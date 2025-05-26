@@ -1,0 +1,99 @@
+version: "3.9"
+
+networks:
+  benign-net:
+    driver: bridge
+    name: benign-net
+    driver_opts:
+      com.docker.network.bridge.name: br-benign
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16    # Trafic normal
+  attack-net:
+    driver: bridge
+    name: attack-net
+    driver_opts:
+      com.docker.network.bridge.name: br-attack
+    ipam:
+      config:
+        - subnet: 172.31.0.0/16
+
+services:
+  # ─── Services « victimes » ─────────────────────────
+  web:
+    image: nginx:alpine
+    networks:
+      - benign-net
+      - attack-net
+    ports: ["8080:80"]           # page test http://localhost:8080
+
+  ftp:
+    image: fauria/vsftpd
+    networks: [benign-net]
+    environment:
+      - FTP_USER=user
+      - FTP_PASS=pass
+      - PASV_ADDRESS=172.30.0.10      # adresse interne
+      - LOG_STDOUT=Yes
+    volumes: [ ./ftpdata:/home/vsftpd ]
+
+  ssh:
+    image: hermsi/alpine-sshd
+    networks: [benign-net]
+    environment:
+      - PASSWORD_ACCESS=true       # autoriser mot-de-passe
+      - ROOT_PASSWORD=pass         # mot de passe root
+
+  smtp:
+    image: bytemark/smtp
+    networks: [benign-net]
+
+  # ─── Générateurs de TRAFIC bénin ───────────────────
+  benign-http:
+    image: curlimages/curl:latest
+    networks: [benign-net]
+    command: |
+      sh -c "while true; do
+               curl -s http://web/ > /dev/null
+               sleep 1
+             done"
+
+  benign-ftp:
+    image: curlimages/curl:latest
+    networks: [benign-net]
+    command: |
+      sh -c "while true; do
+               curl -s ftp://user:pass@ftp/ > /dev/null
+               sleep 2
+             done"
+
+  benign-ssh:
+    image: alpine:latest
+    networks: [ benign-net ]
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apk add --no-cache openssh-client sshpass
+        while true; do
+          sshpass -p pass ssh \
+            -oStrictHostKeyChecking=no \
+            -oUserKnownHostsFile=/dev/null \
+            root@ssh 'echo hi' > /dev/null 2>&1 || true
+          sleep 3
+        done
+
+#  attacker-httpflood:
+#    image: curlimages/curl:latest
+#    networks: [ attack-net ]
+#    entrypoint: /bin/sh
+#    command: |
+#      -c "while true; do
+#            curl -s http://web:80 >/dev/null 2>&1 || true
+#            sleep 0.05           # 20 req/s ≈ 1 200 req/min
+#          done"
+  attacker-httpflood:
+    image: williamyeh/wrk
+    networks: [ attack-net ]
+    command: >
+      -t2 -c200 -d60s http://web:80/
