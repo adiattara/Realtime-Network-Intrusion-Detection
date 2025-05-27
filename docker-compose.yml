@@ -83,17 +83,63 @@ services:
           sleep 3
         done
 
-#  attacker-httpflood:
-#    image: curlimages/curl:latest
-#    networks: [ attack-net ]
-#    entrypoint: /bin/sh
-#    command: |
-#      -c "while true; do
-#            curl -s http://web:80 >/dev/null 2>&1 || true
-#            sleep 0.05           # 20 req/s ≈ 1 200 req/min
-#          done"
   attacker-httpflood:
     image: williamyeh/wrk
-    networks: [ attack-net ]
+    networks: [attack-net]
+    entrypoint: /bin/sh          # override pour pouvoir boucler
     command: >
-      -t2 -c200 -d60s http://web:80/
+      -c 'while true; do
+            echo "[+] wrk burst…";
+            wrk -t2 -c200 -d60s http://web:80/;
+            sleep 5;
+          done'
+
+  # ► Siege (HTTP / HTTPS DDoS « benchmark ») en continu
+  attacker-ddos:
+    image: ubuntu:22.04
+    networks: [attack-net]
+    command: >
+      bash -c "
+        set -e
+        export DEBIAN_FRONTEND=noninteractive &&
+        apt-get update -qq &&
+        apt-get install -yqq siege &&
+        echo '[+] siege loop…' &&
+        while true; do
+          siege -q -b -c 200 -t 60S http://web:80/ || true;
+          sleep 5;
+        done
+      "
+
+  # ► UDP / ICMP flood (hping3) – déjà infini par --flood
+#  attacker-udp-flood:
+#    image: ubuntu:22.04
+#    networks: [attack-net]
+#    command: >
+#      bash -c "
+#        export DEBIAN_FRONTEND=noninteractive &&
+#        apt-get update -qq &&
+#        apt-get install -yqq hping3 iputils-ping &&
+#        echo '[+] hping3 UDP flood (Ctrl-C = docker stop)' &&
+#        hping3 --udp --flood -d 1400 -p 80 web
+#      "
+
+  # ► Port-scan SYN agressif en boucle (30 s de pause)
+  attacker-portscan:
+    image: ubuntu:22.04
+    networks: [attack-net]
+    command: >
+      bash -c "
+        set -e
+        export DEBIAN_FRONTEND=noninteractive &&
+        apt-get update -qq &&
+        apt-get install -yqq nmap &&
+        echo '[+] looped SYN scan every 30 s' &&
+        while true; do
+          TS=\$(date '+%F %T')
+          echo \"--- \$TS : scan start ---\"
+          nmap -sS -T4 -p- web -oG - | grep -v '^#'
+          echo \"--- \$TS : scan end ---\"
+          sleep 30
+        done
+      "
