@@ -19,127 +19,135 @@ networks:
         - subnet: 172.31.0.0/16
 
 services:
-  # ─── Services « victimes » ─────────────────────────
+  # Serveur HTTP (victime)
   web:
     image: nginx:alpine
     networks:
       - benign-net
       - attack-net
-    ports: ["8080:80"]           # page test http://localhost:8080
+    ports:
+      - "8081:80"
 
+  # Serveur FTP (victime)
   ftp:
     image: fauria/vsftpd
-    networks: [benign-net]
+    networks:
+      - benign-net
+      - attack-net
     environment:
       - FTP_USER=user
       - FTP_PASS=pass
-      - PASV_ADDRESS=172.30.0.10      # adresse interne
       - LOG_STDOUT=Yes
-    volumes: [ ./ftpdata:/home/vsftpd ]
+    volumes:
+      - ./ftpdata:/home/vsftpd
 
+  # Serveur SSH (victime)
   ssh:
-    image: hermsi/alpine-sshd
-    networks: [benign-net]
+    image: linuxserver/openssh-server
+    networks:
+      - benign-net
+      - attack-net
     environment:
-      - PASSWORD_ACCESS=true       # autoriser mot-de-passe
-      - ROOT_PASSWORD=pass         # mot de passe root
+      - PASSWORD_ACCESS=true
+      - USER_NAME=test
+      - PASSWORD=test
+      - SUDO_ACCESS=false
+    ports:
+      - "2222:2222"
 
-  smtp:
-    image: bytemark/smtp
-    networks: [benign-net]
-
-  # ─── Générateurs de TRAFIC bénin ───────────────────
+  # Générateur de trafic HTTP
   benign-http:
-    image: curlimages/curl:latest
-    networks: [benign-net]
-    command: |
-      sh -c "while true; do
-               curl -s http://web/ > /dev/null
-               sleep 1
-             done"
+    image: curlimages/curl
+    networks:
+      - benign-net
+    depends_on:
+      - web
+    command: >
+      sh -c "while true; do curl -s http://web > /dev/null; sleep 1; done"
 
+  # Générateur de trafic FTP
   benign-ftp:
-    image: curlimages/curl:latest
-    networks: [benign-net]
-    command: |
-      sh -c "while true; do
-               curl -s ftp://user:pass@ftp/ > /dev/null
-               sleep 2
-             done"
+    image: curlimages/curl
+    networks:
+      - benign-net
+    depends_on:
+      - ftp
+    command: >
+      sh -c "while true; do curl -s ftp://user:pass@ftp/ > /dev/null; sleep 2; done"
 
+  # Générateur de trafic SSH
   benign-ssh:
-    image: alpine:latest
-    networks: [ benign-net ]
-    command:
-      - /bin/sh
-      - -c
-      - |
-        apk add --no-cache openssh-client sshpass
-        while true; do
-          sshpass -p pass ssh \
-            -oStrictHostKeyChecking=no \
-            -oUserKnownHostsFile=/dev/null \
-            root@ssh 'echo hi' > /dev/null 2>&1 || true
-          sleep 3
-        done
-
-  attacker-httpflood:
-    image: williamyeh/wrk
-    networks: [attack-net]
-    entrypoint: /bin/sh          # override pour pouvoir boucler
+    image: alpine
+    networks:
+      - benign-net
+    depends_on:
+      - ssh
     command: >
-      -c 'while true; do
-            echo "[+] wrk burst…";
-            wrk -t2 -c200 -d60s http://web:80/;
-            sleep 5;
-          done'
+      sh -c "apk add --no-cache openssh-client sshpass && \
+      while true; do \
+        sshpass -p test ssh -o StrictHostKeyChecking=no test@ssh -p 2222 'echo hello' > /dev/null 2>&1 || true; \
+        sleep 3; \
+      done"
 
-  # ► Siege (HTTP / HTTPS DDoS « benchmark ») en continu
-  attacker-ddos:
-    image: ubuntu:22.04
-    networks: [attack-net]
+  # Générateur de requêtes DNS valides
+  benign-dns:
+    image: busybox
+    networks:
+      - benign-net
     command: >
-      bash -c "
-        set -e
-        export DEBIAN_FRONTEND=noninteractive &&
-        apt-get update -qq &&
-        apt-get install -yqq siege &&
-        echo '[+] siege loop…' &&
-        while true; do
-          siege -q -b -c 200 -t 60S http://web:80/ || true;
-          sleep 5;
-        done
-      "
+      sh -c "while true; do nslookup google.com > /dev/null; sleep 4; done"
 
-  # ► UDP / ICMP flood (hping3) – déjà infini par --flood
-#  attacker-udp-flood:
+    
+
+##  # ─── Attaques ────────────────────────────────
+#  attacker-httpflood:
+#    image: williamyeh/wrk
+#    networks:
+#      - attack-net
+#    entrypoint: /bin/sh
+#    command:
+#      - -c
+#      - |
+#        while true; do
+#          echo "[+] wrk burst…"
+#          wrk -t2 -c200 -d60s http://web:80/
+#          sleep 5
+#        done
+#
+#  attacker-ddos:
 #    image: ubuntu:22.04
-#    networks: [attack-net]
-#    command: >
-#      bash -c "
+#    networks:
+#      - attack-net
+#    command:
+#      - bash
+#      - -c
+#      - |
+#        set -e &&
 #        export DEBIAN_FRONTEND=noninteractive &&
 #        apt-get update -qq &&
-#        apt-get install -yqq hping3 iputils-ping &&
-#        echo '[+] hping3 UDP flood (Ctrl-C = docker stop)' &&
-#        hping3 --udp --flood -d 1400 -p 80 web
-#      "
-
-  # ► Port-scan SYN agressif en boucle (30 s de pause)
-  attacker-portscan:
-    image: ubuntu:22.04
-    networks: [attack-net]
-    command: >
-      bash -c "
-        set -e
-        export DEBIAN_FRONTEND=noninteractive &&
-        apt-get update -qq &&
-        apt-get install -yqq nmap &&
-        echo '[+] looped SYN scan every 30 s' &&
-        while true; do
-          TS=\$(date '+%F %T')
-          echo \"--- \$TS : scan start ---\"
-          nmap -sS -T4 -p- web -oG - | grep -v '^#'
-          echo \"--- \$TS : scan end ---\"
-          sleep 30
-        done
-      "
+#        apt-get install -yqq siege &&
+#        echo '[+] siege loop…' &&
+#        while true; do
+#          siege -q -b -c 200 -t 60S http://web:80/ || true
+#          sleep 5
+#        done
+#  attacker-portscan:
+#    image: ubuntu:22.04
+#    networks:
+#      - attack-net
+#    command:
+#      - bash
+#      - -c
+#      - |
+#        set -e &&
+#        export DEBIAN_FRONTEND=noninteractive &&
+#        apt-get update -qq &&
+#        apt-get install -yqq nmap &&
+#        echo '[+] looped SYN scan every 30 s' &&
+#        while true; do
+#          TS=$(date '+%F %T')
+#          echo "--- $TS : scan start ---"
+#          nmap -sS -T4 -p- web -oG - | grep -v '^#'
+#          echo "--- $TS : scan end ---"
+#          sleep 30
+#        done
