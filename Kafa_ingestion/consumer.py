@@ -7,8 +7,9 @@ from pyspark.sql.functions import (
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType, DoubleType
 
 # Dépendance Kafka
-os.environ["PYSPARK_SUBMIT_ARGS"] = "--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.0.3 pyspark-shell"
 
+# CORRECTION : Ajout du driver PostgreSQL aux packages
+os.environ["PYSPARK_SUBMIT_ARGS"] = "--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.0.3,org.postgresql:postgresql:42.7.3 pyspark-shell"
 # Schéma JSON
 schema = StructType([
     StructField("timestamp", DoubleType()),
@@ -23,7 +24,10 @@ schema = StructType([
 ])
 
 # Session Spark
-spark = SparkSession.builder.appName("NetworkFlowAggregator").getOrCreate()
+spark = SparkSession.builder \
+    .appName("NetworkFlowAggregator") \
+    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.0.3,org.postgresql:postgresql:42.7.3") \
+    .getOrCreate()
 spark.sparkContext.setLogLevel("WARN")
 
 # Lecture Kafka
@@ -87,14 +91,40 @@ agg_df = windowed \
     .drop("window")
 
 # Écriture vers un CSV coalescé, uniquement si le batch n'est pas vide
+# query = agg_df.writeStream \
+#     .outputMode("append") \
+#     .trigger(processingTime="1 minute") \
+#     .option("checkpointLocation", "/tmp/checkpoint_networkflow") \
+#     .foreachBatch(lambda df, _: df.coalesce(1)
+#         .write.mode("append")
+#         .option("header", True)
+#         .csv("output/normal")
+#     ).start()
+
+jdbc_url = "jdbc:postgresql://localhost:5432/postgres"
+connection_properties = {
+    "user": "nfuser",
+    "password": "nfpass",
+    "driver": "org.postgresql.Driver"
+}
+
+def write_to_postgres(batch_df, batch_id):
+    (
+        batch_df
+        .write
+        .jdbc(
+            url=jdbc_url,
+            table="flow_aggregates",
+            mode="append",
+            properties=connection_properties
+        )
+    )
+
 query = agg_df.writeStream \
     .outputMode("append") \
     .trigger(processingTime="1 minute") \
-    .option("checkpointLocation", "/tmp/checkpoint_networkflow") \
-    .foreachBatch(lambda df, _: df.coalesce(1)
-        .write.mode("append")
-        .option("header", True)
-        .csv("output/normal")
-    ).start()
+    .option("checkpointLocation", "/tmp/checkpoint_networkflow_pg") \
+    .foreachBatch(write_to_postgres) \
+    .start()
 
 query.awaitTermination()
