@@ -1,0 +1,18 @@
+version: '3.8'
+services:
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana_networkflow
+    # Utilise le réseau de l'hôte, donc localhost du conteneur = localhost de la machine
+    network_mode: host
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: adminpass
+      # Vous pouvez forcer le port HTTP dans Grafana lui-même
+      GF_SERVER_HTTP_PORT: 3000
+      GF_DATABASE_SSL_MODE: disable
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  grafana_data:
