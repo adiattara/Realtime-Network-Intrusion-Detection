@@ -1,0 +1,13 @@
+# Ignorer le contenu des répertoires spécifiés
+Realtime-Network-Intrusion-Detection/Data_binaire/*
+Realtime-Network-Intrusion-Detection/Raw_Data/*
+Realtime-Network-Intrusion-Detection/DL_BINARY/models_binaire/*
+Realtime-Network-Intrusion-Detection/Raw_Data/normal/*
+Realtime-Network-Intrusion-Detection/Raw_Data/anormal/*
+
+# Ne pas ignorer les répertoires eux-mêmes
+!Realtime-Network-Intrusion-Detection/Data_binaire/
+!Realtime-Network-Intrusion-Detection/Raw_Data/
+!Realtime-Network-Intrusion-Detection/DL_BINARY/models_binaire/
+!Realtime-Network-Intrusion-Detection/Raw_Data/normal/
+!Realtime-Network-Intrusion-Detection/Raw_Data/anormal/
