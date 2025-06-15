@@ -11,3 +11,7 @@ Realtime-Network-Intrusion-Detection/Raw_Data/anormal/*
 !Realtime-Network-Intrusion-Detection/DL_BINARY/models_binaire/
 !Realtime-Network-Intrusion-Detection/Raw_Data/normal/
 !Realtime-Network-Intrusion-Detection/Raw_Data/anormal/
+
+# Ignorer les notebooks Jupyter dans le répertoire DL_BINARY
+Realtime-Network-Intrusion-Detection/DL_BINARY/*.ipynb
+DL_BINARY/*.ipynb_checkpoints

@@ -1,0 +1,40 @@
+version: "3.8"
+
+services:
+  minio:
+    image: minio/minio
+    container_name: minio
+    restart: always
+    ports:
+      - "9000:9000"   # API S3
+      - "9001:9001"   # Console web
+    environment:
+      MINIO_ROOT_USER: mlflow
+      MINIO_ROOT_PASSWORD: mlflow123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.0.0
+    container_name: mlflow-server
+    depends_on:
+      - minio
+    ports:
+      - "5050:5000"
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: mlflow
+      AWS_SECRET_ACCESS_KEY: mlflow123
+    volumes:
+      - .:/app
+      - ./mlflow.db:/app/mlflow.db
+    working_dir: /app
+    command: >
+      mlflow server 
+            --backend-store-uri sqlite:///mlflow.db 
+            --default-artifact-root s3://mlflow-artifacts 
+            --host 0.0.0.0 
+            --port 5000
+volumes:
+  minio-data:
