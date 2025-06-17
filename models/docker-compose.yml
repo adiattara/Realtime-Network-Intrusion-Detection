@@ -1,0 +1,8 @@
+services:
+  model-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: model-server
+    ports:
+      - "8004:8000"    # expose 8000 du container en 8004 sur l'hôte

@@ -97,9 +97,8 @@ services:
     command: >
       sh -c "while true; do nslookup google.com > /dev/null; sleep 4; done"
 
-    
 
-##  # ─── Attaques ────────────────────────────────
+  # ─── Attaques ────────────────────────────────
 #  attacker-httpflood:
 #    image: williamyeh/wrk
 #    networks:
