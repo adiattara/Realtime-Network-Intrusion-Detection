@@ -9,7 +9,7 @@ from pyspark.sql.types import StructType, StructField, StringType, IntegerType, 
 # Dépendance Kafka
 
 # CORRECTION : Ajout du driver PostgreSQL aux packages
-os.environ["PYSPARK_SUBMIT_ARGS"] = "--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.0.3,org.postgresql:postgresql:42.7.3 pyspark-shell"
+os.environ["PYSPARK_SUBMIT_ARGS"] = "--packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1,org.postgresql:postgresql:42.7.3 pyspark-shell"
 # Schéma JSON
 schema = StructType([
     StructField("timestamp", DoubleType()),
@@ -26,13 +26,13 @@ schema = StructType([
 # Session Spark
 spark = SparkSession.builder \
     .appName("NetworkFlowAggregator") \
-    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.0.3,org.postgresql:postgresql:42.7.3") \
+    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1,org.postgresql:postgresql:42.7.3") \
     .getOrCreate()
 spark.sparkContext.setLogLevel("WARN")
 
 # Lecture Kafka
 raw_df = spark.readStream.format("kafka") \
-    .option("kafka.bootstrap.servers", "localhost:29092") \
+    .option("kafka.bootstrap.servers", "kafka:9092") \
     .option("subscribe", "raw-packets") \
     .option("startingOffsets", "latest") \
     .load()
@@ -90,18 +90,7 @@ agg_df = windowed \
     .withColumn("window_end", col("window.end")) \
     .drop("window")
 
-# Écriture vers un CSV coalescé, uniquement si le batch n'est pas vide
-# query = agg_df.writeStream \
-#     .outputMode("append") \
-#     .trigger(processingTime="1 minute") \
-#     .option("checkpointLocation", "/tmp/checkpoint_networkflow") \
-#     .foreachBatch(lambda df, _: df.coalesce(1)
-#         .write.mode("append")
-#         .option("header", True)
-#         .csv("output/normal")
-#     ).start()
-
-jdbc_url = "jdbc:postgresql://localhost:5432/postgres"
+jdbc_url = "jdbc:postgresql://host.docker.internal:5432/postgres"
 connection_properties = {
     "user": "nfuser",
     "password": "nfpass",

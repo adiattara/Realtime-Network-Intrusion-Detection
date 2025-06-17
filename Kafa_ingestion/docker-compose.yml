@@ -1,6 +1,42 @@
 version: "3"
 
 services:
+  consumer:
+    image: apache/spark:3.4.1
+    container_name: spark-consumer
+    volumes:
+      - ./Kafa_ingestion:/app
+      - ./Kafa_ingestion/jars:/opt/spark/jars
+    working_dir: /app
+    environment:
+      - SPARK_LOCAL_IP=spark-consumer
+      - SPARK_MASTER=local[*]
+      - SPARK_HOME=/opt/spark
+    entrypoint: [""]  # Override any existing entrypoint
+    command: >
+      bash -c "
+      export SPARK_DIST_CLASSPATH=$(/opt/spark/bin/compute-classpath.sh)
+      /opt/spark/bin/spark-submit
+      --jars /opt/spark/jars/postgresql-42.7.3.jar
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1
+      /app/consumer.py
+      "
+    depends_on:
+      - kafka
+    networks:
+      - benign-net
+
+  producer:
+    build: .
+    container_name: kafka-producer
+    depends_on:
+      - kafka
+    networks:
+      - benign-net
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
   zookeeper:
     image: confluentinc/cp-zookeeper:latest
     hostname: zookeeper
@@ -10,9 +46,11 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - benign-net
 
   kafka:
-    image: confluentinc/cp-kafka:latest
+    image: confluentinc/cp-kafka:7.4.0
     hostname: kafka
     container_name: kafka
     ports:
@@ -21,17 +59,20 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT #,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       # Points importants :
       #  - kafka écoute sur 9092 en interne (docker network)
       #  - kafka annonce localhost:29092 pour clients externes (ta machine hôte)
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092 #,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092 #,PLAINTEXT_HOST://localhost:29092
+      # KAFKA_PROCESS_ROLES: broker
     depends_on:
       - zookeeper
+    networks:
+      - benign-net
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -44,4 +85,11 @@ services:
       KAFKA_CLUSTERS_0_ZOOKEEPER: "zookeeper:2181"
     depends_on:
       - kafka
+    networks:
+      - benign-net
 
+networks:
+  benign-net:
+    external: true
+  attack-net:
+    external: true

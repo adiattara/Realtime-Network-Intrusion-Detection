@@ -1,0 +1,4 @@
+scapy
+confluent_kafka
+kafka-python
+kafka

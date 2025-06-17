@@ -1,10 +1,28 @@
 from scapy.all import sniff, IP, TCP, UDP
 from confluent_kafka import Producer
 import json, argparse, ipaddress
+from confluent_kafka import Producer
+import time
+
+
 
 # Plages IP « Normal » et « Mal »
 NORMAL_NET = ipaddress.ip_network("172.30.0.0/16")
 MAL_NET = ipaddress.ip_network("172.31.0.0/16")
+
+def wait_for_kafka(bootstrap_servers, retries=10, delay=5):
+    for i in range(retries):
+        try:
+            print(f"[i] Tentative de connexion à Kafka ({i+1}/{retries})...")
+            producer = Producer({'bootstrap.servers': bootstrap_servers})
+            # test en envoyant un flush à vide
+            producer.flush(0.1)
+            print("[✔] Connexion établie à Kafka.")
+            return producer
+        except Exception as e:
+            print(f"[!] Kafka non disponible : {e}")
+            time.sleep(delay)
+    raise Exception("[✘] Kafka toujours inaccessible après plusieurs tentatives.")
 
 
 # Fonction pour déterminer si l'IP source est dans la plage Malveillante
@@ -20,7 +38,8 @@ parser.add_argument("-b", "--broker", default="localhost:29092", help="broker Ka
 args = parser.parse_args()
 
 # Initialisation du producteur Kafka
-producer = Producer({"bootstrap.servers": args.broker})
+#producer = Producer({"bootstrap.servers": args.broker})
+producer = wait_for_kafka("kafka:9092")
 
 
 def pkt_to_json(pkt):
