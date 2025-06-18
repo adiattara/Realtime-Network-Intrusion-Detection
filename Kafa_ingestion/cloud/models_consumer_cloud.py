@@ -9,13 +9,15 @@ import traceback
 
 # Configuration
 KAFKA_TOPIC = "aggregated-flows"
-KAFKA_BOOTSTRAP_SERVERS = ["localhost:29092"]
-MODEL_ENDPOINT = "http://localhost:8004/predict"
+KAFKA_BOOTSTRAP_SERVERS = ["pkc-p11xm.us-east-1.aws.confluent.cloud:9092"]
+API_KEY = "MRZSJLNDLOTJQFN4"
+API_SECRET = "QP9p0PYrfSsXK+RNhhDBcNegcBpQeAbrsr664O+Lj1qMMScjtV2fn/sovW3fdRsx"
+MODEL_ENDPOINT = "https://realtime-network-intrusion-detection.onrender.com/predict"
 POSTGRES_CONFIG = {
     "dbname": "postgres",
-    "user": "nfuser",
-    "password": "nfpass",
-    "host": "localhost",
+    "user": "postgres",
+    "password": "postgres_password",
+    "host": "database-1.c1a68y6y81zu.eu-north-1.rds.amazonaws.com",
     "port": "5432",
 }
 
@@ -56,11 +58,14 @@ try:
     consumer = KafkaConsumer(
         KAFKA_TOPIC,
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        security_protocol="SASL_SSL",
+        sasl_mechanism="PLAIN",
+        sasl_plain_username=API_KEY,
+        sasl_plain_password=API_SECRET,
         value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-        enable_auto_commit=True,
-        auto_commit_interval_ms=1000,
-        auto_offset_reset='earliest',
-        group_id="test_model_consumer"
+        auto_commit_interval_ms=10,
+        group_id="test_model_consumer",
+        auto_offset_reset = 'earliest'
     )
     log("Kafka Consumer initialisé.")
 except Exception:

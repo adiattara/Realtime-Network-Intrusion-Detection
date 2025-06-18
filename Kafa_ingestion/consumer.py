@@ -35,6 +35,7 @@ raw_df = spark.readStream.format("kafka") \
     .option("kafka.bootstrap.servers", "localhost:29092") \
     .option("subscribe", "raw-packets") \
     .option("startingOffsets", "latest") \
+    .option("failOnDataLoss", "false")\
     .load()
 
 # Parsing JSON
@@ -127,4 +128,16 @@ query = agg_df.writeStream \
     .foreachBatch(write_to_postgres) \
     .start()
 
-query.awaitTermination()
+kafka_query = (agg_df
+    .selectExpr("to_json(struct(*)) AS value")
+    .writeStream
+    .format("kafka")
+    .option("kafka.bootstrap.servers","localhost:29092")
+    .option("topic","aggregated-flows")
+    .option("checkpointLocation","chk_kafka")
+    .trigger(processingTime="1 minute")
+    .outputMode("append")
+    .start()
+)
+
+spark.streams.awaitAnyTermination()

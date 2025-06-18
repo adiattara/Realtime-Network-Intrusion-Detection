@@ -29,8 +29,7 @@ services:
       #  - kafka écoute sur 9092 en interne (docker network)
       #  - kafka annonce localhost:29092 pour clients externes (ta machine hôte)
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_HOST://localhost:29092
-      # KAFKA_PROCESS_ROLES: broker
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
     depends_on:
       - zookeeper
 
@@ -41,7 +40,7 @@ services:
       - 8080:8080
     environment:
       KAFKA_CLUSTERS_0_NAME: "local"
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "localhost:9092"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka:9092"
       KAFKA_CLUSTERS_0_ZOOKEEPER: "zookeeper:2181"
     depends_on:
       - kafka
