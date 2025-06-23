@@ -133,12 +133,12 @@ def write_to_postgres(batch_df, batch_id):
         )
     )
 
-query = agg_df.writeStream \
-    .outputMode("append") \
-    .trigger(processingTime="1 minute") \
-    .option("checkpointLocation", "/tmp/checkpoint_networkflow_pg") \
-    .foreachBatch(write_to_postgres) \
-    .start()
+# query = agg_df.writeStream \
+#     .outputMode("append") \
+#     .trigger(processingTime="1 minute") \
+#     .option("checkpointLocation", "/tmp/checkpoint_networkflow_pg") \
+#     .foreachBatch(write_to_postgres) \
+#     .start()
 
 # kafka_query = (agg_df
 #     .selectExpr("to_json(struct(*)) AS value")
@@ -163,7 +163,6 @@ kafka_query = (agg_df
         'org.apache.kafka.common.security.plain.PlainLoginModule required username="MRZSJLNDLOTJQFN4" password="QP9p0PYrfSsXK+RNhhDBcNegcBpQeAbrsr664O+Lj1qMMScjtV2fn/sovW3fdRsx";') \
     .option("topic", "aggregated-flows")
     .option("checkpointLocation","chk_kafka")
-    .trigger(processingTime="1 minute")
     .outputMode("append")
     .start()
 )

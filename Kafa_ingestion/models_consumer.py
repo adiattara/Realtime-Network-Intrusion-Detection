@@ -41,7 +41,8 @@ try:
         duration_ms FLOAT,
         flow_pkts_per_s FLOAT,
         fwd_bwd_ratio FLOAT,
-        prediction TEXT
+        prediction TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
     conn.commit()
@@ -59,10 +60,12 @@ try:
         value_deserializer=lambda m: json.loads(m.decode("utf-8")),
         enable_auto_commit=True,
         auto_commit_interval_ms=1000,
-        auto_offset_reset='earliest',
-        group_id="test_model_consumer"
+        auto_offset_reset='latest',
+        group_id="test_model_c"
     )
     log("Kafka Consumer initialisé.")
+    consumer.poll(timeout_ms=1000)
+    consumer.seek_to_end()
 except Exception:
     log("Erreur lors de la connexion à Kafka :")
     traceback.print_exc()
