@@ -40,8 +40,8 @@ services:
       - LOG_STDOUT=Yes
     volumes:
       - ./ftpdata:/home/vsftpd
-#
-#  # Serveur SSH (victime)
+
+  # Serveur SSH (victime)
   ssh:
     image: linuxserver/openssh-server
     networks:
@@ -75,7 +75,7 @@ services:
     command: >
       sh -c "while true; do curl -s ftp://user:pass@ftp/ > /dev/null; sleep 2; done"
 
-  #Générateur de trafic SSH
+  # Générateur de trafic SSH
   benign-ssh:
     image: alpine
     networks:
@@ -97,8 +97,8 @@ services:
     command: >
       sh -c "while true; do nslookup google.com > /dev/null; sleep 4; done"
 
+  #─── Attaques ────────────────────────────────
 
-#   #─── Attaques ────────────────────────────────
   attacker-httpflood:
     image: williamyeh/wrk
     networks:
@@ -130,23 +130,21 @@ services:
           siege -q -b -c 200 -t 60S http://web:80/ || true
           sleep 5
         done
+
   attacker-portscan:
     image: ubuntu:22.04
     networks:
       - attack-net
-    command:
-      - bash
-      - -c
-      - |
-        set -e &&
-        export DEBIAN_FRONTEND=noninteractive &&
-        apt-get update -qq &&
-        apt-get install -yqq nmap &&
-        echo '[+] looped SYN scan every 30 s' &&
-        while true; do
-          TS=$(date '+%F %T')
-          echo "--- $TS : scan start ---"
-          nmap -sS -T4 -p- web -oG - | grep -v '^#'
-          echo "--- $TS : scan end ---"
-          sleep 30
-        done
+    command: >
+      bash -c "set -e && \
+      export DEBIAN_FRONTEND=noninteractive && \
+      apt-get update -qq && \
+      apt-get install -yqq nmap && \
+      echo '[+] looped SYN scan every 30 s' && \
+      while true; do \
+        TS=$$(date '+%F %T'); \
+        echo \"--- $$TS : scan start ---\"; \
+        nmap -sS -T4 -p- web -oG - | grep -v '^#'; \
+        echo \"--- $$TS : scan end ---\"; \
+        sleep 30; \
+      done"
