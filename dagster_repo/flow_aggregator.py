@@ -3,12 +3,14 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import threading
 import json
+import statistics
 
 
 class FlowAggregator:
     """
     Classe pour agréger les paquets réseau en flows (conversations)
-    Optimisée pour l'analyse temps réel et le machine learning
+    VERSION CORRIGÉE: Direction préservée, calculs précis des features CIC-IDS2017
+    Compatible avec le code Dash existant (mêmes noms de fonctions/variables)
     """
 
     def __init__(self, flow_timeout=60, cleanup_interval=30):
@@ -37,13 +39,13 @@ class FlowAggregator:
     def create_flow_key(self, packet):
         """
         Crée une clé unique pour identifier un flow (conversation)
-        Format: IP1:PORT1-IP2:PORT2-PROTOCOL
+        CORRIGÉ: Direction préservée (pas de normalisation biaisée)
 
         Args:
             packet (dict): Paquet réseau parsé
 
         Returns:
-            str: Clé unique du flow
+            str: Clé directionnelle du flow
         """
         src_ip = packet.get('src_ip', 'unknown')
         dst_ip = packet.get('dst_ip', 'unknown')
@@ -51,16 +53,13 @@ class FlowAggregator:
         dport = packet.get('dport', 0)
         protocol = packet.get('protocol', 'unknown')
 
-        # Normaliser la direction pour éviter les doublons
-        # Toujours mettre la plus petite IP en premier
-        if src_ip < dst_ip or (src_ip == dst_ip and sport < dport):
-            return f"{src_ip}:{sport}-{dst_ip}:{dport}-{protocol}"
-        else:
-            return f"{dst_ip}:{dport}-{src_ip}:{sport}-{protocol}"
+        # CORRECTION: Garder la direction originale (pas de normalisation)
+        return f"{src_ip}:{sport}-{dst_ip}:{dport}-{protocol}"
 
     def determine_direction(self, packet, flow_key):
         """
         Détermine si le paquet va dans la direction forward ou backward
+        CORRIGÉ: Forward = même direction que le premier paquet du flow
 
         Args:
             packet (dict): Paquet réseau
@@ -69,10 +68,24 @@ class FlowAggregator:
         Returns:
             str: 'forward' ou 'backward'
         """
-        # Extraire la première IP du flow_key (direction forward)
-        first_ip = flow_key.split('-')[0].split(':')[0]
+        # Extraire la direction originale du flow_key
+        flow_parts = flow_key.split('-')
+        flow_src_part = flow_parts[0]  # "src_ip:sport"
+        flow_dst_part = flow_parts[1]  # "dst_ip:dport"
 
-        if packet.get('src_ip') == first_ip:
+        flow_src_ip = flow_src_part.split(':')[0]
+        flow_dst_ip = flow_dst_part.split(':')[0]
+        flow_src_port = int(flow_src_part.split(':')[1])
+        flow_dst_port = int(flow_dst_part.split(':')[1])
+
+        pkt_src_ip = packet.get('src_ip')
+        pkt_dst_ip = packet.get('dst_ip')
+        pkt_src_port = packet.get('sport')
+        pkt_dst_port = packet.get('dport')
+
+        # Forward = même direction que le flow original
+        if (pkt_src_ip == flow_src_ip and pkt_dst_ip == flow_dst_ip and
+                pkt_src_port == flow_src_port and pkt_dst_port == flow_dst_port):
             return 'forward'
         else:
             return 'backward'
@@ -100,6 +113,7 @@ class FlowAggregator:
     def create_new_flow(self, packet, flow_key):
         """
         Crée un nouveau flow à partir du premier paquet
+        CORRIGÉ: Stockage des longueurs de paquets pour calculs précis
 
         Args:
             packet (dict): Premier paquet du flow
@@ -128,6 +142,10 @@ class FlowAggregator:
             'bwd_bytes': packet_length if direction == 'backward' else 0,
             'fwd_pkts': 1 if direction == 'forward' else 0,
             'bwd_pkts': 1 if direction == 'backward' else 0,
+
+            # NOUVEAU: Stockage des longueurs pour calculs précis CIC-IDS2017
+            'fwd_packet_lengths': [packet_length] if direction == 'forward' else [],
+            'bwd_packet_lengths': [packet_length] if direction == 'backward' else [],
 
             # Flags TCP
             'psh_count': flags['psh_count'],
@@ -161,6 +179,7 @@ class FlowAggregator:
     def update_flow(self, flow, packet):
         """
         Met à jour un flow existant avec un nouveau paquet
+        CORRIGÉ: Mise à jour des listes de longueurs pour calculs précis
 
         Args:
             flow (dict): Flow existant
@@ -178,13 +197,15 @@ class FlowAggregator:
         flow['last_packet_ts'] = current_time
         flow['last_activity'] = current_time
 
-        # Direction forward/backward
+        # Direction forward/backward avec mise à jour des listes
         if direction == 'forward':
             flow['fwd_bytes'] += packet_length
             flow['fwd_pkts'] += 1
+            flow['fwd_packet_lengths'].append(packet_length)
         else:
             flow['bwd_bytes'] += packet_length
             flow['bwd_pkts'] += 1
+            flow['bwd_packet_lengths'].append(packet_length)
 
         # Flags TCP
         flow['psh_count'] += flags['psh_count']
@@ -273,10 +294,10 @@ class FlowAggregator:
         self.last_cleanup = current_time
 
         # Calculer flows par minute
-        if self.stats['completed_flows'] > 0:
-            total_time_minutes = (current_time - self.last_cleanup) / 60
-            if total_time_minutes > 0:
-                self.stats['flows_per_minute'] = len(expired_flows) / total_time_minutes
+        if len(expired_flows) > 0:
+            time_elapsed_minutes = (current_time - self.last_cleanup) / 60
+            if time_elapsed_minutes > 0:
+                self.stats['flows_per_minute'] = len(expired_flows) / time_elapsed_minutes
 
     def get_active_flows(self, limit=100):
         """
@@ -393,10 +414,11 @@ class FlowAggregator:
             return json.dumps(export_data, indent=2, default=str)
 
 
-# Fonction utilitaire pour extraire les features ML
+# Fonction utilitaire pour extraire les features ML - VERSION CORRIGÉE
 def extract_cic_features(flow):
     """
     Extrait les features compatibles CIC-IDS2017 depuis un flow
+    VERSION CORRIGÉE: Calculs précis avec les vraies longueurs de paquets
 
     Args:
         flow (dict): Flow agrégé
@@ -405,27 +427,64 @@ def extract_cic_features(flow):
         list: Liste des 10 features pour le modèle ML
     """
     try:
+        # Récupérer les listes de longueurs de paquets
+        fwd_lengths = flow.get('fwd_packet_lengths', [])
+        bwd_lengths = flow.get('bwd_packet_lengths', [])
+        all_lengths = fwd_lengths + bwd_lengths
+
         # Calculs sécurisés (éviter division par zéro)
         duration_sec = max(flow.get('duration_ms', 0) / 1000.0, 0.001)
-        fwd_pkts = max(flow.get('fwd_pkts', 1), 1)
-        bwd_pkts = max(flow.get('bwd_pkts', 1), 1)
 
-        avg_fwd_size = flow.get('fwd_bytes', 0) / fwd_pkts
-        avg_bwd_size = flow.get('bwd_bytes', 0) / bwd_pkts
-        bwd_pkts_per_sec = flow.get('bwd_pkts', 0) / duration_sec
+        # Feature 1: Destination Port
+        dest_port = flow.get('dport', 0)
 
-        # Les 10 features du modèle CIC-IDS2017
+        # Features 2-3: Backward packet lengths
+        if bwd_lengths:
+            bwd_packet_length_min = min(bwd_lengths)
+            bwd_packet_length_mean = statistics.mean(bwd_lengths)
+        else:
+            bwd_packet_length_min = 0
+            bwd_packet_length_mean = 0
+
+        # Feature 4: Backward Packets/s
+        bwd_packets_per_sec = flow.get('bwd_pkts', 0) / duration_sec
+
+        # Feature 5: Min Packet Length (overall)
+        min_packet_length = min(all_lengths) if all_lengths else 0
+
+        # Features 6-7: Flag counts
+        psh_flag_count = flow.get('psh_count', 0)
+        urg_flag_count = flow.get('urg_count', 0)
+
+        # Features 8-9: Average segment sizes
+        if fwd_lengths:
+            avg_fwd_segment_size = statistics.mean(fwd_lengths)
+        else:
+            avg_fwd_segment_size = 0
+
+        if bwd_lengths:
+            avg_bwd_segment_size = statistics.mean(bwd_lengths)
+        else:
+            avg_bwd_segment_size = 0
+
+        # Feature 10: Min segment size forward
+        if fwd_lengths:
+            min_seg_size_forward = min(fwd_lengths)
+        else:
+            min_seg_size_forward = 0
+
+        # Les 10 features du modèle CIC-IDS2017 (calculs corrects)
         features = [
-            flow.get('dport', 0),  # Destination Port
-            avg_bwd_size,  # Bwd Packet Length Min
-            avg_bwd_size,  # Bwd Packet Length Mean
-            bwd_pkts_per_sec,  # Bwd Packets/s
-            min(avg_fwd_size, avg_bwd_size),  # Min Packet Length
-            flow.get('psh_count', 0),  # PSH Flag Count
-            flow.get('urg_count', 0),  # URG Flag Count
-            avg_fwd_size,  # Avg Fwd Segment Size
-            avg_bwd_size,  # Avg Bwd Segment Size
-            avg_fwd_size  # min_seg_size_forward
+            dest_port,  # Destination Port
+            bwd_packet_length_min,  # Bwd Packet Length Min
+            bwd_packet_length_mean,  # Bwd Packet Length Mean
+            bwd_packets_per_sec,  # Bwd Packets/s
+            min_packet_length,  # Min Packet Length
+            psh_flag_count,  # PSH Flag Count
+            urg_flag_count,  # URG Flag Count
+            avg_fwd_segment_size,  # Avg Fwd Segment Size
+            avg_bwd_segment_size,  # Avg Bwd Segment Size
+            min_seg_size_forward  # min_seg_size_forward
         ]
 
         return features
