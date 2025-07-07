@@ -21,7 +21,22 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 import json
 import statistics
+import requests
+import sqlite3
 
+
+
+API_URL = "https://realtime-network-intrusion-detection.onrender.com/predict"
+
+def predict_flow(flow_features):
+    try:
+        response = requests.post(API_URL, json=flow_features, timeout=1)
+        if response.status_code == 200:
+            return response.json().get("label", "N/A")
+        else:
+            return "Erreur API"
+    except Exception as e:
+        return f"Erreur: {e}"
 
 # =====================================
 # SYSTÈME MULTI-UTILISATEURS INTÉGRÉ
@@ -489,9 +504,218 @@ class UltimateNetworkApp:
         self.app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP],suppress_callback_exceptions=True)
         self.app.server.secret_key = secrets.token_hex(32)
         self.app.config.suppress_callback_exceptions = True
+        self.displayed_flows = {}  # user_id -> {flow_key: timestamp_affichage}
+        self.accumulated_flow_cards = {}  # user_id -> {flow_key: flow_card}
 
+        self.init_database()
         self.setup_layout()
         self.setup_callbacks()
+
+    def init_database(self):
+        """Initialize the SQLite database for storing reported erroneous flows"""
+        conn = sqlite3.connect('reported_flows.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS reported_flows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            flow_key TEXT NOT NULL,
+            src_ip TEXT,
+            dst_ip TEXT,
+            sport INTEGER,
+            dport INTEGER,
+            protocol TEXT,
+            total_bytes INTEGER,
+            pkt_count INTEGER,
+            prediction TEXT,
+            user_id TEXT,
+            reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            flow_data TEXT
+        )
+        ''')
+        conn.commit()
+        conn.close()
+
+    def store_reported_flow(self, flow, user_id):
+        """Store a reported erroneous flow in the database"""
+        try:
+            conn = sqlite3.connect('reported_flows.db')
+            cursor = conn.cursor()
+
+            # Convert the entire flow dict to JSON for storage
+            flow_data = json.dumps(flow)
+
+            cursor.execute('''
+            INSERT INTO reported_flows 
+            (flow_key, src_ip, dst_ip, sport, dport, protocol, total_bytes, pkt_count, prediction, user_id, flow_data)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                flow.get('flow_key', ''),
+                flow.get('src_ip', ''),
+                flow.get('dst_ip', ''),
+                flow.get('sport', 0),
+                flow.get('dport', 0),
+                flow.get('protocol', ''),
+                flow.get('total_bytes', 0),
+                flow.get('pkt_count', 0),
+                flow.get('prediction', ''),
+                user_id,
+                flow_data
+            ))
+
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error storing reported flow: {e}")
+            return False
+
+    def get_reported_flows(self, user_id=None, prediction_filter=None, limit=100):
+        """Retrieve reported flows from the database with optional filtering"""
+        try:
+            conn = sqlite3.connect('reported_flows.db')
+            conn.row_factory = sqlite3.Row  # This enables column access by name
+            cursor = conn.cursor()
+
+            query = "SELECT * FROM reported_flows"
+            params = []
+
+            # Add filters if provided
+            where_clauses = []
+            # if user_id:
+            #     where_clauses.append("user_id = ?")
+            #     params.append(user_id)
+
+            if prediction_filter and prediction_filter != "all":
+                if prediction_filter == "Mal":
+                    where_clauses.append("prediction = 'Mal'")
+                else:
+                    where_clauses.append("prediction = ?")
+                    params.append(prediction_filter)
+
+            if where_clauses:
+                query += " WHERE " + " AND ".join(where_clauses)
+
+            query += " ORDER BY reported_at DESC LIMIT ?"
+            params.append(limit)
+            print("Executing query:", query, "with params:", params)
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            print("rows retrieved:", len(rows))
+
+            # Debug: Check if there are any rows in the table at all
+            cursor.execute("SELECT COUNT(*) FROM reported_flows")
+            total_rows = cursor.fetchone()[0]
+            print("Total rows in reported_flows table:", total_rows)
+
+            # Debug: If there are rows but none match our query, let's see what's in the table
+            if total_rows > 0 and len(rows) == 0:
+                cursor.execute("SELECT id, flow_key, prediction, user_id FROM reported_flows LIMIT 10")
+                sample_rows = cursor.fetchall()
+                print("Sample rows from reported_flows table:")
+                for row in sample_rows:
+                    print(row)
+
+            # Convert rows to dictionaries
+            flows = []
+            for row in rows:
+                flow_dict = dict(row)
+                # Parse the JSON stored in flow_data
+                if 'flow_data' in flow_dict and flow_dict['flow_data']:
+                    try:
+                        flow_dict['parsed_flow_data'] = json.loads(flow_dict['flow_data'])
+                    except:
+                        flow_dict['parsed_flow_data'] = {}
+                flows.append(flow_dict)
+
+            conn.close()
+            return flows
+        except Exception as e:
+            print(f"Error retrieving reported flows: {e}")
+            return []
+
+    def export_flows_for_retraining(self, flow_ids, export_format="json"):
+        """Export selected flows for retraining in the specified format"""
+        try:
+            if not flow_ids:
+                return False, "Aucun flow sélectionné pour l'export"
+
+            # Get the flows from the database
+            conn = sqlite3.connect('reported_flows.db')
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            # Convert flow_ids to tuple for SQL IN clause
+            if len(flow_ids) == 1:
+                # Special case for a single ID (SQL syntax requires trailing comma)
+                placeholders = f"({flow_ids[0]})"
+            else:
+                placeholders = str(tuple(flow_ids))
+
+            query = f"SELECT * FROM reported_flows WHERE id IN {placeholders}"
+            cursor.execute(query)
+            rows = cursor.fetchall()
+
+            if not rows:
+                conn.close()
+                return False, "Aucun flow trouvé avec les IDs spécifiés"
+
+            # Convert rows to dictionaries
+            flows = []
+            for row in rows:
+                flow_dict = dict(row)
+                # Parse the JSON stored in flow_data
+                if 'flow_data' in flow_dict and flow_dict['flow_data']:
+                    try:
+                        flow_dict['parsed_flow_data'] = json.loads(flow_dict['flow_data'])
+                    except:
+                        flow_dict['parsed_flow_data'] = {}
+                flows.append(flow_dict)
+
+            conn.close()
+
+            # Create export filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"flows_for_retraining_{timestamp}.{export_format}"
+
+            # Export the flows in the specified format
+            if export_format == "json":
+                with open(filename, 'w') as f:
+                    json.dump(flows, f, indent=2)
+            elif export_format == "csv":
+                # Extract relevant fields for CSV
+                csv_data = []
+                for flow in flows:
+                    if 'parsed_flow_data' in flow and flow['parsed_flow_data']:
+                        # Extract features from the parsed flow data
+                        features = flow['parsed_flow_data'].get('cic_features', [])
+                        if features:
+                            csv_data.append({
+                                'flow_id': flow['id'],
+                                'prediction': flow['prediction'],
+                                'features': features
+                            })
+
+                # Write to CSV
+                if csv_data:
+                    with open(filename, 'w', newline='') as f:
+                        import csv
+                        writer = csv.writer(f)
+                        # Write header
+                        writer.writerow(['flow_id', 'prediction', 'features'])
+                        # Write data
+                        for row in csv_data:
+                            writer.writerow([row['flow_id'], row['prediction'], row['features']])
+                else:
+                    return False, "Aucune donnée valide pour l'export CSV"
+            else:
+                return False, f"Format d'export non supporté: {export_format}"
+
+            return True, f"Flows exportés avec succès dans {filename}"
+
+        except Exception as e:
+            print(f"Error exporting flows: {e}")
+            return False, f"Erreur lors de l'export: {str(e)}"
+
 
     def get_user_capture_manager(self, session_id):
         user = self.user_manager.get_user_by_session(session_id)
@@ -544,6 +768,8 @@ class UltimateNetworkApp:
                 return self.capture_page(user)
             elif pathname == '/analysis':
                 return self.analysis_page(user)
+            elif pathname == '/reported-flows':
+                return self.reported_flows_page(user)
             else:
                 return self.dashboard_page(user)
 
@@ -880,10 +1106,20 @@ class UltimateNetworkApp:
             prevent_initial_call=True
         )
         def update_analysis_page(n_intervals, session_data, pathname):
+            print("=== update_analysis_page CALLED ===")
+            print("session_data:", session_data)
+            print("pathname:", pathname)
+
             if not session_data or pathname != '/analysis':
+                return no_update, no_update, no_update, []
+
+            user = self.user_manager.get_user_by_session(session_data['session_id'])
+            if not user:
                 return no_update, no_update, no_update, no_update
 
             capture_manager = self.get_user_capture_manager(session_data['session_id'])
+            print("capture_manager:", capture_manager)
+
             if not capture_manager:
                 return no_update, no_update, no_update, no_update
 
@@ -899,45 +1135,176 @@ class UltimateNetworkApp:
                 stop_btn_disabled = True
                 stop_btn_style = {'display': 'none'}
 
-            # Récupérer les flows terminés
-            terminated_flows = capture_manager.flow_aggregator.get_terminated_flows(limit=50)
+            # Récupérer les flows terminés - augmenter la limite pour afficher plus de flows
+            terminated_flows = capture_manager.flow_aggregator.get_terminated_flows(limit=100)
+            print("terminated_flows (raw):", terminated_flows)
 
-            if not terminated_flows:
+            # Initialize displayed_flows and accumulated_flow_cards for this user if they don't exist
+            if user.user_id not in self.displayed_flows:
+                self.displayed_flows[user.user_id] = {}
+
+            if user.user_id not in self.accumulated_flow_cards:
+                self.accumulated_flow_cards[user.user_id] = {}
+
+            current_time = time.time()
+
+            if not terminated_flows and not self.accumulated_flow_cards[user.user_id]:
                 terminated_flows_content = dbc.Alert("Aucun flow terminé disponible", color="info")
             else:
-                # Créer une liste de cartes pour chaque flow terminé
-                flow_cards = []
+                # Process new flows
                 for flow in terminated_flows:
-                    # Extraire les features ML pour le format demandé
-                    ml_features = {
-                        "total_bytes": flow.get('total_bytes', 0),
-                        "pkt_count": flow.get('pkt_count', 0),
-                        "psh_count": flow.get('psh_count', 0),
-                        "fwd_bytes": flow.get('fwd_bytes', 0),
-                        "bwd_bytes": flow.get('bwd_bytes', 0),
-                        "fwd_pkts": flow.get('fwd_pkts', 0),
-                        "bwd_pkts": flow.get('bwd_pkts', 0),
-                        "dport": flow.get('dport', 0),
-                        "duration_ms": flow.get('duration_ms', 0),
-                        "flow_pkts_per_s": flow.get('pkt_count', 0) / max(flow.get('duration_ms', 1) / 1000, 0.001),
-                        "fwd_bwd_ratio": flow.get('fwd_bytes', 0) / max(flow.get('bwd_bytes', 1), 1)
+                    print("FLOW:", flow)
+                    try:
+                        # Get flow key
+                        flow_key = flow.get('flow_key', '')
+
+                        # Skip if we've already processed this flow
+                        if flow_key in self.accumulated_flow_cards[user.user_id]:
+                            continue
+
+                        # Track when this flow was first displayed
+                        if flow_key not in self.displayed_flows[user.user_id]:
+                            self.displayed_flows[user.user_id][flow_key] = current_time
+
+                        # Calculate how long this flow has been displayed
+                        display_time = current_time - self.displayed_flows[user.user_id][flow_key]
+                        can_report = display_time >= 10  # 10 seconds minimum
+
+                        # Store the flow data for later use in the report callback
+                        flow['prediction'] = ''  # Will be set below
+
+                        # Extraire les features ML pour le format demandé
+                        ml_features = {
+                            "total_bytes": flow.get('total_bytes', 0),
+                            "pkt_count": flow.get('pkt_count', 0),
+                            "psh_count": flow.get('psh_count', 0),
+                            "fwd_bytes": flow.get('fwd_bytes', 0),
+                            "bwd_bytes": flow.get('bwd_bytes', 0),
+                            "fwd_pkts": flow.get('fwd_pkts', 0),
+                            "bwd_pkts": flow.get('bwd_pkts', 0),
+                            "dport": flow.get('dport', 0),
+                            "duration_ms": flow.get('duration_ms', 0),
+                            "flow_pkts_per_s": flow.get('pkt_count', 0) / max(flow.get('duration_ms', 1) / 1000, 0.001),
+                            "fwd_bwd_ratio": flow.get('fwd_bytes', 0) / max(flow.get('bwd_bytes', 1), 1)
+                        }
+
+                        prediction = predict_flow(ml_features)
+                        ml_features['prediction'] = str(prediction)
+                        flow['prediction'] = str(prediction)  # Store prediction in flow data
+
+                        # Couleur & badge en fonction du résultat
+                        prediction_text = str(prediction)
+                        if "Erreur" in prediction_text:
+                            card_color = "warning"
+                            prediction_badge = html.Span([
+                                "⚠️ ", prediction_text
+                            ], className="badge bg-warning text-dark")
+                        elif prediction_text == "Normal":
+                            card_color = "success"
+                            prediction_badge = html.Span([
+                                "✅ Trafic normal (benign)"
+                            ], className="badge bg-success")
+                        else:
+                            card_color = "danger"
+                            prediction_badge = html.Span([
+                                "🚨 Attaque détectée: ", prediction_text
+                            ], className="badge bg-danger")
+
+                        # Create report button with appropriate state
+                        if can_report:
+                            report_button = dbc.Button(
+                                "🚩 Signaler comme erroné", 
+                                id={"type": "report-flow-btn", "index": flow_key},
+                                color="outline-danger",
+                                size="sm",
+                                className="mt-2",
+                                n_clicks=0
+                            )
+                            report_status = ""
+                        else:
+                            # Calculate remaining time
+                            remaining_seconds = int(10 - display_time)
+                            report_button = dbc.Button(
+                                f"🕒 Attendre {remaining_seconds}s", 
+                                id={"type": "report-flow-btn", "index": flow_key},
+                                color="outline-secondary",
+                                size="sm",
+                                className="mt-2",
+                                disabled=True
+                            )
+                            report_status = html.Small(
+                                f"Ce flow pourra être signalé dans {remaining_seconds} secondes",
+                                className="text-muted"
+                            )
+
+                        flow_card = dbc.Card([
+                            dbc.CardHeader([
+                                html.Div([
+                                    dbc.Row([
+                                        dbc.Col([
+                                            dbc.Checkbox(
+                                                id={"type": "flow-select-checkbox", "index": flow_key},
+                                                className="me-2",
+                                                persistence=True,               # ← active la persistence
+                                                persistence_type='memory'
+                                            )
+                                        ], width="auto"),
+                                        dbc.Col([
+                                            html.Span(
+                                                f"Flow: {flow.get('src_ip', 'Unknown')}:{flow.get('sport', 0)} → {flow.get('dst_ip', 'Unknown')}:{flow.get('dport', 0)} ({flow.get('protocol', 'Unknown')})"),
+                                            html.Div(prediction_badge, className="mt-2")
+                                        ])
+                                    ])
+                                ])
+                            ], className=f"bg-{card_color} bg-opacity-25"),
+                            dbc.CardBody([
+                                html.H6("ML Features:"),
+                                html.Pre(json.dumps(ml_features, indent=2),
+                                         style={'background-color': '#f8f9fa', 'padding': '10px',
+                                                'border-radius': '5px'}),
+                                html.Div([
+                                    report_button,
+                                    report_status,
+                                    html.Div(id={"type": "report-status", "index": flow_key})
+                                ])
+                            ])
+                        ], className="mb-3", color=card_color, outline=True)
+
+                        # Store the flow card in the accumulated flow cards dictionary
+                        self.accumulated_flow_cards[user.user_id][flow_key] = flow_card
+                    except Exception as e:
+                        print(f"Erreur lors du rendu du flow : {flow.get('flow_key', '???')} : {e}")
+                        # Ajoute une carte erreur pour visualiser dans l'UI
+                        error_key = f"error_{time.time()}"
+                        self.accumulated_flow_cards[user.user_id][error_key] = dbc.Alert(
+                            f"Erreur rendering flow: {e}", color="danger", className="mb-2"
+                        )
+
+                # Récupérer toutes les cartes accumulées
+                all_flow_cards = list(self.accumulated_flow_cards[user.user_id].values())
+
+                # Filtrer tout None éventuel (sécurité)
+                all_flow_cards = [card for card in all_flow_cards if card is not None]
+
+                # Toujours passer une liste de composants Dash, jamais de None ou d'objet natif
+                terminated_flows_content = html.Div(
+                    all_flow_cards,
+                    style={
+                        'maxHeight': '550px',  # ajuste la hauteur à ton besoin
+                        'overflowY': 'auto',
+                        'border': '1px solid #e5e5e5',
+                        'backgroundColor': '#fcfcfc',
+                        'padding': '8px'
                     }
+                )
 
-                    # Créer une carte pour ce flow
-                    flow_card = dbc.Card([
-                        dbc.CardHeader(f"Flow: {flow.get('src_ip', 'Unknown')}:{flow.get('sport', 0)} → {flow.get('dst_ip', 'Unknown')}:{flow.get('dport', 0)} ({flow.get('protocol', 'Unknown')})"),
-                        dbc.CardBody([
-                            html.H6("ML Features:"),
-                            html.Pre(json.dumps(ml_features, indent=2),
-                                    style={'background-color': '#f8f9fa', 'padding': '10px', 'border-radius': '5px'})
-                        ])
-                    ], className="mb-3")
+            return (
+                capture_status,
+                stop_btn_disabled,
+                stop_btn_style,
+                terminated_flows_content if terminated_flows_content else []
+            )
 
-                    flow_cards.append(flow_card)
-
-                terminated_flows_content = html.Div(flow_cards)
-
-            return capture_status, stop_btn_disabled, stop_btn_style, terminated_flows_content
 
         # Dashboard Updates
         @callback(
@@ -1090,10 +1457,338 @@ class UltimateNetworkApp:
         @callback(
             Output('main-interval', 'disabled', allow_duplicate=True),
             Input('url', 'pathname'),
-            prevent_initial_call=True
+            prevent_initial_call='initial_duplicate'
         )
         def enable_interval_on_dashboard(pathname):
             return pathname not in ['/dashboard', '/analysis']  # False = actif, True = désactivé
+
+        # Refresh reported flows table
+        @callback(
+            Output('reported-flows-table', 'children'),
+            [Input('refresh-reported-flows', 'n_clicks'),
+             Input('url', 'pathname')],
+            [State('prediction-filter', 'value'),
+             State('limit-input', 'value'),
+             State('session-store', 'data')],
+            prevent_initial_call=False
+        )
+        def refresh_reported_flows(n_clicks, pathname, prediction_filter, limit, session_data):
+            if pathname != '/reported-flows':
+                return no_update
+
+            if not session_data:
+                return html.Div("Session expirée. Veuillez vous reconnecter.")
+
+            user = self.user_manager.get_user_by_session(session_data['session_id'])
+            if not user:
+                return html.Div("Utilisateur non trouvé. Veuillez vous reconnecter.")
+
+            # Get reported flows from database
+            flows = self.get_reported_flows(
+                user_id=user.user_id,
+                prediction_filter=prediction_filter,
+                limit=limit
+            )
+
+            if not flows:
+                return html.Div("Aucun flow signalé trouvé.")
+
+            # Create a table with checkboxes for selection
+            table_header = [
+                html.Thead(html.Tr([
+                    html.Th("Sélection", style={'width': '10%'}),
+                    html.Th("ID", style={'width': '5%'}),
+                    html.Th("Source → Destination", style={'width': '25%'}),
+                    html.Th("Prédiction", style={'width': '15%'}),
+                    html.Th("Date signalé", style={'width': '15%'}),
+                    html.Th("Détails", style={'width': '30%'})
+                ]))
+            ]
+
+            rows = []
+            for flow in flows:
+                # Format the flow information
+                flow_id = flow.get('id', 'N/A')
+                src_ip = flow.get('src_ip', 'N/A')
+                dst_ip = flow.get('dst_ip', 'N/A')
+                sport = flow.get('sport', 'N/A')
+                dport = flow.get('dport', 'N/A')
+                protocol = flow.get('protocol', 'N/A')
+                prediction = flow.get('prediction', 'N/A')
+                reported_at = flow.get('reported_at', 'N/A')
+
+                # Format source to destination
+                src_dst = f"{src_ip}:{sport} → {dst_ip}:{dport} ({protocol})"
+
+                # Format prediction with color
+                if prediction == 'Normal':
+                    prediction_badge = html.Span("Normal", className="badge bg-success")
+                elif "Erreur" in prediction:
+                    prediction_badge = html.Span(prediction, className="badge bg-warning text-dark")
+                else:
+                    prediction_badge = html.Span(prediction, className="badge bg-danger")
+
+                # Create a collapsible details section
+                details = dbc.Button(
+                    "Voir détails",
+                    id={"type": "flow-details-btn", "index": flow_id},
+                    color="info",
+                    size="sm",
+                    className="me-2"
+                )
+
+                # Create the row
+                row = html.Tr([
+                    html.Td(dbc.Checkbox(
+                        id={"type": "flow-checkbox", "index": flow_id},
+                        persistence=True,
+                        persistence_type='memory'
+                    )),
+                    html.Td(flow_id),
+                    html.Td(src_dst),
+                    html.Td(prediction_badge),
+                    html.Td(reported_at),
+                    html.Td(details)
+                ])
+                rows.append(row)
+
+            table_body = [html.Tbody(rows)]
+
+            table = dbc.Table(
+                table_header + table_body,
+                bordered=True,
+                hover=True,
+                responsive=True,
+                striped=True,
+                className="mt-3"
+            )
+
+            return table
+
+        # Handle flow selection
+        @callback(
+            Output('selected-flows', 'data'),
+            Input({"type": "flow-checkbox", "index": dash.ALL}, "checked"),
+            State({"type": "flow-checkbox", "index": dash.ALL}, "id"),
+            State('selected-flows', 'data'),
+            prevent_initial_call=True
+        )
+        def update_selected_flows(checked_values, checkbox_ids, current_selection):
+            selected_flows = current_selection.copy() if current_selection else []
+
+            if checked_values and checkbox_ids:
+                print(f"length of checked_values: {len(checked_values)}")
+                for i, checked in enumerate(checked_values):
+                    flow_id = checkbox_ids[i]["index"]
+                    if checked and flow_id not in selected_flows:
+                        selected_flows.append(flow_id)
+                    elif not checked and flow_id in selected_flows:
+                        selected_flows.remove(flow_id)
+            print(f"Selected flows:{len(selected_flows)} : {selected_flows}")
+            return selected_flows
+
+        # Show export confirmation modal
+        @callback(
+            Output('export-confirmation-modal', 'is_open'),
+            Input('export-selected-btn', 'n_clicks'),
+            Input('cancel-export', 'n_clicks'),
+            Input('confirm-export', 'n_clicks'),
+            State('export-confirmation-modal', 'is_open'),
+            prevent_initial_call=True
+        )
+        def toggle_export_modal(export_clicks, cancel_clicks, confirm_clicks, is_open):
+            ctx = callback_context
+            if not ctx.triggered:
+                return is_open
+
+            button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+
+            if button_id == 'export-selected-btn' and export_clicks:
+                return True
+            elif (button_id == 'cancel-export' and cancel_clicks) or (button_id == 'confirm-export' and confirm_clicks):
+                return False
+
+            return is_open
+
+        # Handle export confirmation
+        @callback(
+            Output('export-status', 'children'),
+            Input('confirm-export', 'n_clicks'),
+            State('selected-flows', 'data'),
+            State('session-store', 'data'),
+            prevent_initial_call=True
+        )
+        def handle_export(n_clicks, selected_flows, session_data):
+            if not n_clicks or not selected_flows:
+                return no_update
+
+            if not session_data:
+                return dbc.Alert("Session expirée. Veuillez vous reconnecter.", color="danger")
+
+            user = self.user_manager.get_user_by_session(session_data['session_id'])
+            if not user:
+                return dbc.Alert("Utilisateur non trouvé. Veuillez vous reconnecter.", color="danger")
+
+            # Export the selected flows
+            success, message = self.export_flows_for_retraining(selected_flows, export_format="json")
+
+            if success:
+                return dbc.Alert(message, color="success")
+            else:
+                return dbc.Alert(message, color="danger")
+
+        # Handle flow selection on analysis page
+        @callback(
+            Output("analysis-selected-flows", "data"),
+            Input({"type": "flow-select-checkbox", "index": dash.ALL}, "checked"),
+            State({"type": "flow-select-checkbox", "index": dash.ALL}, "id"),
+            State("analysis-selected-flows", "data"),
+            prevent_initial_call=True
+        )
+        def update_analysis_selected_flows(checked_values, checkbox_ids, current_selection):
+            selected_flows = current_selection.copy() if current_selection else []
+
+            if checked_values and checkbox_ids:
+                for i, checked in enumerate(checked_values):
+                    flow_key = checkbox_ids[i]["index"]
+                    if checked and flow_key not in selected_flows:
+                        selected_flows.append(flow_key)
+                    elif not checked and flow_key in selected_flows:
+                        selected_flows.remove(flow_key)
+
+            return selected_flows
+
+        # Show export confirmation modal on analysis page
+        @callback(
+            Output("analysis-export-modal", "is_open"),
+            Input("analysis-export-btn", "n_clicks"),
+            Input("analysis-cancel-export", "n_clicks"),
+            Input("analysis-confirm-export", "n_clicks"),
+            State("analysis-export-modal", "is_open"),
+            prevent_initial_call=True
+        )
+        def toggle_analysis_export_modal(export_clicks, cancel_clicks, confirm_clicks, is_open):
+            ctx = callback_context
+            if not ctx.triggered:
+                return is_open
+
+            button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+
+            if button_id == "analysis-export-btn" and export_clicks:
+                return True
+            elif (button_id == "analysis-cancel-export" and cancel_clicks) or (button_id == "analysis-confirm-export" and confirm_clicks):
+                return False
+
+            return is_open
+
+        # Handle export confirmation on analysis page
+        @callback(
+            Output("capture-status-analysis", "children", allow_duplicate=True),
+            Input("analysis-confirm-export", "n_clicks"),
+            State("analysis-selected-flows", "data"),
+            State("session-store", "data"),
+            prevent_initial_call=True
+        )
+        def handle_analysis_export(n_clicks, selected_flows, session_data):
+            if not n_clicks or not selected_flows:
+                return no_update
+
+            if not session_data:
+                return dbc.Alert("Session expirée. Veuillez vous reconnecter.", color="danger")
+
+            user = self.user_manager.get_user_by_session(session_data['session_id'])
+            if not user:
+                return dbc.Alert("Utilisateur non trouvé. Veuillez vous reconnecter.", color="danger")
+
+            capture_manager = self.get_user_capture_manager(session_data['session_id'])
+            if not capture_manager:
+                return dbc.Alert("Gestionnaire de capture non disponible.", color="danger")
+
+            # Get the flows from the accumulated flow cards
+            flows_to_export = []
+            for flow_key in selected_flows:
+                # Find the flow in terminated flows
+                terminated_flows = capture_manager.flow_aggregator.get_terminated_flows(limit=100)
+                for flow in terminated_flows:
+                    if flow.get('flow_key', '') == flow_key:
+                        # Store the flow in the database first
+                        self.store_reported_flow(flow, user.user_id)
+                        flows_to_export.append(flow_key)
+                        break
+
+            if not flows_to_export:
+                return dbc.Alert("Aucun flow valide trouvé pour l'export.", color="warning")
+
+            # Export the flows
+            # We'll use the flow keys as IDs to retrieve from the database
+            # First, get the IDs from the database
+            conn = sqlite3.connect('reported_flows.db')
+            cursor = conn.cursor()
+            flow_ids = []
+
+            for flow_key in flows_to_export:
+                cursor.execute("SELECT id FROM reported_flows WHERE flow_key = ? AND user_id = ? ORDER BY reported_at DESC LIMIT 1", 
+                              (flow_key, user.user_id))
+                result = cursor.fetchone()
+                if result:
+                    flow_ids.append(result[0])
+
+            conn.close()
+
+            if not flow_ids:
+                return dbc.Alert("Aucun flow trouvé dans la base de données.", color="warning")
+
+            # Now export the flows
+            success, message = self.export_flows_for_retraining(flow_ids, export_format="json")
+
+            if success:
+                return dbc.Alert(message, color="success")
+            else:
+                return dbc.Alert(message, color="danger")
+
+        # Handle report flow button click
+        @callback(
+            Output({"type": "report-status", "index": dash.dependencies.MATCH}, "children"),
+            Input({"type": "report-flow-btn", "index": dash.dependencies.MATCH}, "n_clicks"),
+            State({"type": "report-flow-btn", "index": dash.dependencies.MATCH}, "id"),
+            State("session-store", "data"),
+            prevent_initial_call=True
+        )
+        def handle_report_flow(n_clicks, btn_id, session_data):
+            if not n_clicks or n_clicks <= 0 or not session_data:
+                return no_update
+
+            # Get the flow key from the button ID
+            flow_key = btn_id["index"]
+
+            # Get the user
+            user = self.user_manager.get_user_by_session(session_data['session_id'])
+            if not user:
+                return dbc.Alert("❌ Erreur: Session utilisateur invalide", color="danger")
+
+            # Get the capture manager
+            capture_manager = self.get_user_capture_manager(session_data['session_id'])
+            if not capture_manager:
+                return dbc.Alert("❌ Erreur: Gestionnaire de capture non disponible", color="danger")
+
+            # Find the flow in terminated flows
+            terminated_flows = capture_manager.flow_aggregator.get_terminated_flows(limit=100)
+            flow = None
+            for f in terminated_flows:
+                if f.get('flow_key', '') == flow_key:
+                    flow = f
+                    break
+
+            if not flow:
+                return dbc.Alert("❌ Erreur: Flow non trouvé", color="danger")
+
+            # Store the flow in the database
+            success = self.store_reported_flow(flow, user.user_id)
+
+            if success:
+                return dbc.Alert("✅ Flow signalé comme erroné avec succès", color="success")
+            else:
+                return dbc.Alert("❌ Erreur lors du signalement du flow", color="danger")
 
     def create_stat_card(self, title, value, color):
         return dbc.Col([
@@ -1576,6 +2271,19 @@ class UltimateNetworkApp:
         capture_active = capture_manager and capture_manager.connection_active
 
         return dbc.Container([
+            # Store pour les flows sélectionnés
+            dcc.Store(id="analysis-selected-flows", data=[]),
+
+            # Modal de confirmation d'export
+            dbc.Modal([
+                dbc.ModalHeader("Confirmation d'export"),
+                dbc.ModalBody("Êtes-vous sûr de vouloir exporter les flows sélectionnés pour le réentraînement?"),
+                dbc.ModalFooter([
+                    dbc.Button("Annuler", id="analysis-cancel-export", className="me-2"),
+                    dbc.Button("Exporter", id="analysis-confirm-export", color="success")
+                ])
+            ], id="analysis-export-modal"),
+
             # Header avec navigation
             dbc.Row([
                 dbc.Col([
@@ -1585,7 +2293,10 @@ class UltimateNetworkApp:
                 dbc.Col([
                     dbc.Button("⏹️ Arrêter Capture", id="analysis-stop-btn", color="warning", outline=True,
                               size="sm", n_clicks=0, disabled=not capture_active,
-                              style={'display': 'inline-block' if capture_active else 'none'})
+                              style={'display': 'inline-block' if capture_active else 'none'}),
+                    dbc.Button("📤 Exporter Sélection", id="analysis-export-btn", color="success", outline=True,
+                              size="sm", className="ms-2"),
+                    html.A("🔄 Flows Signalés", href="/reported-flows", className="btn btn-outline-info btn-sm ms-2")
                 ], width=4, className="text-end")
             ], className="mb-4"),
 
@@ -1610,7 +2321,6 @@ class UltimateNetworkApp:
                     dbc.Card([
                         dbc.CardHeader("🔍 Explication des Features"),
                         dbc.CardBody([
-                            html.P("🔬 Features CIC-IDS2017 extraites automatiquement"),
                             html.P("📊 Prêt pour classification des flows réseau"),
 
                             dbc.Alert([
@@ -1631,6 +2341,97 @@ class UltimateNetworkApp:
                     ])
                 ])
             ])
+        ], fluid=True)
+
+    def reported_flows_page(self, user):
+        """Page for managing reported flows for retraining"""
+        return dbc.Container([
+            # Header avec navigation
+            dbc.Row([
+                dbc.Col([
+                    html.H1("🔄 Flows Signalés pour Réentraînement", className="text-primary"),
+                    html.A("← Retour analyse", href="/analysis", className="btn btn-outline-secondary btn-sm mb-4")
+                ], width=8),
+                dbc.Col([
+                    html.Div(id="export-status")
+                ], width=4, className="text-end")
+            ], className="mb-4"),
+
+            # Filtres
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("🔍 Filtres"),
+                        dbc.CardBody([
+                            dbc.Row([
+                                dbc.Col([
+                                    dbc.Label("Type de prédiction"),
+                                    dbc.Select(
+                                        id="prediction-filter",
+                                        options=[
+                                            {"label": "Tous", "value": "all"},
+                                            {"label": "Normal", "value": "Normal"},
+                                            {"label": "Mal", "value": "Mal"}
+                                        ],
+                                        value="all"
+                                    )
+                                ], width=6),
+                                dbc.Col([
+                                    dbc.Label("Limite"),
+                                    dbc.Input(
+                                        id="limit-input",
+                                        type="number",
+                                        min=1,
+                                        max=1000,
+                                        value=100
+                                    )
+                                ], width=6)
+                            ]),
+                            dbc.Button(
+                                "🔄 Rafraîchir", 
+                                id="refresh-reported-flows", 
+                                color="primary", 
+                                className="mt-3"
+                            )
+                        ])
+                    ])
+                ])
+            ], className="mb-4"),
+
+            # Tableau des flows signalés
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader([
+                            html.Div([
+                                html.Span("📋 Flows Signalés", className="me-auto"),
+                                dbc.Button(
+                                    "📤 Exporter Sélection", 
+                                    id="export-selected-btn",
+                                    color="success",
+                                    className="ms-2"
+                                )
+                            ], className="d-flex justify-content-between align-items-center")
+                        ]),
+                        dbc.CardBody([
+                            html.Div(id="reported-flows-table")
+                        ])
+                    ])
+                ])
+            ]),
+
+            # Modal de confirmation d'export
+            dbc.Modal([
+                dbc.ModalHeader("Confirmation d'export"),
+                dbc.ModalBody("Êtes-vous sûr de vouloir exporter les flows sélectionnés pour le réentraînement?"),
+                dbc.ModalFooter([
+                    dbc.Button("Annuler", id="cancel-export", className="me-2"),
+                    dbc.Button("Exporter", id="confirm-export", color="success")
+                ])
+            ], id="export-confirmation-modal"),
+
+            # Store pour les flows sélectionnés
+            dcc.Store(id="selected-flows", data=[])
         ], fluid=True)
 
     def run(self, debug=True, port=8050):
