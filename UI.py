@@ -26,7 +26,7 @@ import sqlite3
 
 
 
-API_URL = "https://realtime-network-intrusion-detection.onrender.com/predict"
+API_URL = "https://realtime-network-intrusion-detection-8itu.onrender.com/predict"
 
 def predict_flow(flow_features):
     try:
