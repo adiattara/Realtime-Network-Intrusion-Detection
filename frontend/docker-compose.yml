@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  # Application Dash
+  app:
+    build: .
+    container_name: network_app
+    env_file:
+      - ./.env
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql://user:password@network_db:5432/networkdb}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - BOT_EMAIL=${BOT_EMAIL:-}
+      - BOT_APP_PASSWORD=${BOT_APP_PASSWORD:-}
+      - API_URL=${API_URL:-}
+    volumes:
+      - ../ssh_keys:/app/ssh_keys:ro
+    ports:
+      - "8050:8050"
+    networks:
+      - network_db_network
+    restart: unless-stopped
+
+networks:
+  network_db_network:
+    external: true
+    name: network_db_network
