@@ -23,10 +23,17 @@ import json
 import statistics
 import requests
 import sqlite3
+from collections import Counter
+import plotly.graph_objs as go
+from alerting import process_new_flow_for_alerting
+from openai import OpenAI
+from dotenv import load_dotenv
 
+load_dotenv()
 
 
 API_URL = "https://realtime-network-intrusion-detection-8itu.onrender.com/predict"
+openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
 def predict_flow(flow_features):
     try:
@@ -37,6 +44,39 @@ def predict_flow(flow_features):
             return "Erreur API"
     except Exception as e:
         return f"Erreur: {e}"
+
+
+def resumer_texte(texte, modele="gpt-3.5-turbo"):
+    """
+    Résume un flow réseau malicieux à l’aide d’un LLM.
+    Le texte d’entrée doit être un JSON avec les features réseau + prédiction.
+    """
+    try:
+        response = openai_client.chat.completions.create(
+            model=modele,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Tu es un expert en cybersécurité chargé de résumer un flux réseau malicieux. "
+                        "Chaque flux est au format JSON et contient des caractéristiques techniques (paquets, octets, durée, ratio, etc.) "
+                        "et une prédiction ('Mal' ou 'Normal'). Ton objectif est de générer UNE SEULE formulation courte et claire, "
+                        "compréhensible par un analyste SOC. Mets en avant les anomalies importantes (asymétrie, volume, durée, ratio). "
+                        "Ta réponse ne doit PAS dépasser 3 phrases courtes."
+
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Voici un flow à résumer : {texte}"
+                }
+            ],
+            temperature=0.5,
+            max_tokens=200  # Ajuste selon ton usage
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"Erreur de résumé : {e}"
 
 # =====================================
 # SYSTÈME MULTI-UTILISATEURS INTÉGRÉ
@@ -167,9 +207,8 @@ class UserManager:
 # =====================================
 # FLOW AGGREGATOR INTÉGRÉ
 # =====================================
-
 class FlowAggregator:
-    def __init__(self, flow_timeout=60, cleanup_interval=30):
+    def __init__(self, flow_timeout=60, cleanup_interval=30, alert_callback=None):
         self._bidirectional_sessions = {}
         self.flows = {}
         self.completed_flows = []
@@ -184,6 +223,9 @@ class FlowAggregator:
             'completed_flows': 0,
             'flows_per_minute': 0
         }
+
+
+        self.alert_callback = alert_callback
 
     def create_flow_key(self, packet):
         src_ip = packet.get('src_ip', 'unknown')
@@ -305,6 +347,34 @@ class FlowAggregator:
 
         if flags['fin_count'] > 0 or flags['rst_count'] > 0:
             flow['status'] = 'terminated'
+            # C'est à ce moment-là qu'on fait la prédiction !
+            if 'prediction' not in flow:  # Sécurité : on ne prédit qu'une fois
+                ml_features = {
+                    "total_bytes": flow.get('total_bytes', 0),
+                    "pkt_count": flow.get('pkt_count', 0),
+                    "psh_count": flow.get('psh_count', 0),
+                    "fwd_bytes": flow.get('fwd_bytes', 0),
+                    "bwd_bytes": flow.get('bwd_bytes', 0),
+                    "fwd_pkts": flow.get('fwd_pkts', 0),
+                    "bwd_pkts": flow.get('bwd_pkts', 0),
+                    "dport": flow.get('dport', 0),
+                    "duration_ms": flow.get('duration_ms', 0),
+                    "flow_pkts_per_s": flow.get('pkt_count', 0) / max(flow.get('duration_ms', 1) / 1000, 0.001),
+                    "fwd_bwd_ratio": flow.get('fwd_bytes', 0) / max(flow.get('bwd_bytes', 1), 1)
+                }
+                prediction = predict_flow(ml_features)
+                flow['prediction'] = str(prediction)
+
+                # Sinon, pas de prédiction sur les flows actifs
+
+                # 🚨 alerte en background, si défini
+                if self.alert_callback:
+                    # on lance dans un thread pour ne pas bloquer le traitement de paquets
+                    threading.Thread(
+                        target=self.alert_callback,
+                        args=(flow,),
+                        daemon=True
+                    ).start()
 
     def get_active_flows(self, limit=100):
         with self.lock:
@@ -345,6 +415,17 @@ class FlowAggregator:
                 'flows_per_minute': 0
             }
 
+    def check_timeouts(self):
+        """
+        Parcourt tous les flows actifs et les termine s'ils sont inactifs depuis plus de self.flow_timeout secondes.
+        À appeler régulièrement ou avant de récupérer les flows terminés.
+        """
+        now = time.time()
+        with self.lock:
+            for flow in self.flows.values():
+                if flow.get('status') == 'active' and (now - flow.get('last_activity', now)) > self.flow_timeout:
+                    flow['status'] = 'terminated'
+                    print(f"[DEBUG] Flow terminé par timeout d'inactivité : {flow['flow_key']}")
 
 def extract_cic_features(flow):
     try:
@@ -380,9 +461,15 @@ def extract_cic_features(flow):
 # =====================================
 
 class UserCaptureManager:
-    def __init__(self, user_id):
+    def __init__(self, user_id, user_email):
         self.user_id = user_id
+        self.user_email = user_email
         self.flow_aggregator = FlowAggregator(flow_timeout=30, cleanup_interval=10)
+        self.flow_aggregator = FlowAggregator(
+            flow_timeout=30,
+            cleanup_interval=10,
+            alert_callback=self._alert_user
+        )
         self.packet_queue = queue.Queue()
         self.flow_queue = queue.Queue()
 
@@ -397,6 +484,14 @@ class UserCaptureManager:
             'interfaces': [],
             'filters': ''
         }
+
+    def _alert_user(self, flow):
+        """
+        Appelé en background dès qu'un flow malveillant est terminé.
+        process_new_flow_for_alerting gère seuils, cooldowns, envoi SMTP.
+        """
+        process_new_flow_for_alerting(flow, self.user_email)
+
 
 
 def parse_tcpdump_line(line, current_ts=None):
@@ -511,6 +606,9 @@ class UltimateNetworkApp:
         self.setup_layout()
         self.setup_callbacks()
 
+        self.last_terminated_flows = []
+
+
     def init_database(self):
         """Initialize the SQLite database for storing reported erroneous flows"""
         conn = sqlite3.connect('reported_flows.db')
@@ -527,6 +625,7 @@ class UltimateNetworkApp:
             total_bytes INTEGER,
             pkt_count INTEGER,
             prediction TEXT,
+            label_humain TEXT,
             user_id TEXT,
             reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             flow_data TEXT
@@ -541,13 +640,19 @@ class UltimateNetworkApp:
             conn = sqlite3.connect('reported_flows.db')
             cursor = conn.cursor()
 
+            # Inverser la prédiction
+            if flow.get('prediction') == 'Mal':
+                label_humain = 'Normal'
+            elif flow.get('prediction') == 'Normal':
+                label_humain = 'Mal'
+
             # Convert the entire flow dict to JSON for storage
             flow_data = json.dumps(flow)
 
             cursor.execute('''
             INSERT INTO reported_flows 
-            (flow_key, src_ip, dst_ip, sport, dport, protocol, total_bytes, pkt_count, prediction, user_id, flow_data)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (flow_key, src_ip, dst_ip, sport, dport, protocol, total_bytes, pkt_count, prediction, label_humain, user_id, flow_data)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 flow.get('flow_key', ''),
                 flow.get('src_ip', ''),
@@ -558,6 +663,7 @@ class UltimateNetworkApp:
                 flow.get('total_bytes', 0),
                 flow.get('pkt_count', 0),
                 flow.get('prediction', ''),
+                label_humain,
                 user_id,
                 flow_data
             ))
@@ -663,6 +769,7 @@ class UltimateNetworkApp:
             flows = []
             for row in rows:
                 flow_dict = dict(row)
+                print("Flow retrieved:", flow_dict)
                 # Parse the JSON stored in flow_data
                 if 'flow_data' in flow_dict and flow_dict['flow_data']:
                     try:
@@ -723,7 +830,7 @@ class UltimateNetworkApp:
             return None
 
         if user.user_id not in self.user_captures:
-            self.user_captures[user.user_id] = UserCaptureManager(user.user_id)
+            self.user_captures[user.user_id] = UserCaptureManager(user.user_id, user.email)
 
         return self.user_captures[user.user_id]
 
@@ -1153,7 +1260,7 @@ class UltimateNetworkApp:
             else:
                 # Process new flows
                 for flow in terminated_flows:
-                    print("FLOW:", flow)
+                    #print("FLOW:", flow)
                     try:
                         # Get flow key
                         flow_key = flow.get('flow_key', '')
@@ -1192,6 +1299,18 @@ class UltimateNetworkApp:
                         ml_features['prediction'] = str(prediction)
                         flow['prediction'] = str(prediction)  # Store prediction in flow data
 
+                        # Injecter ces deux features dans le flow lui-même
+                        flow["flow_pkts_per_s"] = ml_features["flow_pkts_per_s"]
+                        flow["fwd_bwd_ratio"] = ml_features["fwd_bwd_ratio"]
+
+                        print("flow type :", type(flow))
+                        flow_summary = ""
+                        if flow["prediction"] == "Mal":
+                            try:
+                                flow_summary = resumer_texte(json.dumps(ml_features))
+                            except Exception as e:
+                                flow_summary = f"Erreur de résumé : {e}"
+
                         # Couleur & badge en fonction du résultat
                         prediction_text = str(prediction)
                         if "Erreur" in prediction_text:
@@ -1213,7 +1332,7 @@ class UltimateNetworkApp:
                         # Create report button with appropriate state
                         if can_report:
                             report_button = dbc.Button(
-                                "🚩 Signaler comme erroné", 
+                                "🚩 Signaler comme erroné",
                                 id={"type": "report-flow-btn", "index": flow_key},
                                 color="outline-danger",
                                 size="sm",
@@ -1225,7 +1344,7 @@ class UltimateNetworkApp:
                             # Calculate remaining time
                             remaining_seconds = int(10 - display_time)
                             report_button = dbc.Button(
-                                f"🕒 Attendre {remaining_seconds}s", 
+                                f"🕒 Attendre {remaining_seconds}s",
                                 id={"type": "report-flow-btn", "index": flow_key},
                                 color="outline-secondary",
                                 size="sm",
@@ -1246,7 +1365,8 @@ class UltimateNetworkApp:
                                                 id={"type": "flow-select-checkbox", "index": flow_key},
                                                 className="me-2",
                                                 persistence=True,               # ← active la persistence
-                                                persistence_type='memory'
+                                                persistence_type='memory',
+                                                value=False
                                             )
                                         ], width="auto"),
                                         dbc.Col([
@@ -1262,6 +1382,8 @@ class UltimateNetworkApp:
                                 html.Pre(json.dumps(ml_features, indent=2),
                                          style={'background-color': '#f8f9fa', 'padding': '10px',
                                                 'border-radius': '5px'}),
+                                html.H6("Résumé du Flow:", className="mt-3") if flow_summary else "",
+                                html.Div(flow_summary, className="fst-italic text-dark") if flow_summary else "",
                                 html.Div([
                                     report_button,
                                     report_status,
@@ -1311,6 +1433,10 @@ class UltimateNetworkApp:
             [Output('user-stats-cards', 'children'),
              Output('flows-live-table', 'children'),
              Output('traffic-chart', 'figure'),
+             Output('debit-actuel-value', 'children'),
+             Output('sessions-actives-value', 'children'),
+             #Output('connexions-anormales-value', 'children'),
+             Output('top-ips-chart', 'figure'),
              Output('capture-status-dashboard', 'children', allow_duplicate=True),
              Output('dashboard-stop-btn', 'disabled', allow_duplicate=True),
              Output('dashboard-stop-btn', 'style', allow_duplicate=True)],
@@ -1366,6 +1492,38 @@ class UltimateNetworkApp:
             # Graphique du trafic
             traffic_fig = self.create_traffic_chart(active_flows)
 
+            # Calcul du débit en Mbps
+            debit_bytes = sum(flow['total_bytes'] for flow in active_flows)
+            interval_s = 1  # Ajuste selon ton intervalle réel de rafraîchissement
+            debit_mbps = (debit_bytes * 8) / 1_000_000 / interval_s  # en Mbps
+
+            # Calcul du nombre de sessions actives
+            nb_sessions = sum(1 for flow in active_flows if flow.get('status') == 'active')
+
+            nb_connexions_anormales = sum(1 for flow in active_flows if flow.get('status') == 'anomalous')
+
+            # Compte les IP sources
+            counter_ips = Counter(flow.get('src_ip') for flow in active_flows if flow.get('src_ip'))
+            top_ips = counter_ips.most_common(5)
+            if top_ips:
+                ips, counts = zip(*top_ips)
+            else:
+                ips, counts = [], []
+
+            fig_top_ips = go.Figure()
+            fig_top_ips.add_trace(go.Bar(
+                x=list(counts),
+                y=list(ips),
+                orientation='h'
+            ))
+            fig_top_ips.update_layout(
+                xaxis_title='Nombre de connexions',
+                yaxis_title='Adresse IP',
+                title='🌐 Top 10 IP Sources les plus actives',
+                yaxis={'categoryorder': 'total ascending'}
+            )
+
+
             # Mise à jour du statut de capture dans le dashboard
             capture_active = capture_manager.connection_active
 
@@ -1378,7 +1536,7 @@ class UltimateNetworkApp:
                 stop_btn_disabled = True
                 stop_btn_style = {'display': 'none'}
 
-            return stats_cards, flows_table, traffic_fig, capture_status, stop_btn_disabled, stop_btn_style
+            return stats_cards, flows_table, traffic_fig, f"{debit_mbps:.2f} Mbps", nb_sessions, fig_top_ips, capture_status, stop_btn_disabled, stop_btn_style
 
         # Update Capture Page Controls
         @callback(
@@ -1500,8 +1658,8 @@ class UltimateNetworkApp:
                     html.Th("ID", style={'width': '5%'}),
                     html.Th("Source → Destination", style={'width': '25%'}),
                     html.Th("Prédiction", style={'width': '15%'}),
-                    html.Th("Date signalé", style={'width': '15%'}),
-                    html.Th("Détails", style={'width': '30%'})
+                    html.Th("Label humain", style={'width': '15%'}),
+                    html.Th("Date signalé", style={'width': '15%'})
                 ]))
             ]
 
@@ -1515,6 +1673,7 @@ class UltimateNetworkApp:
                 dport = flow.get('dport', 'N/A')
                 protocol = flow.get('protocol', 'N/A')
                 prediction = flow.get('prediction', 'N/A')
+                label_humain = flow.get('label_humain', 'N/A')
                 reported_at = flow.get('reported_at', 'N/A')
 
                 # Format source to destination
@@ -1528,14 +1687,7 @@ class UltimateNetworkApp:
                 else:
                     prediction_badge = html.Span(prediction, className="badge bg-danger")
 
-                # Create a collapsible details section
-                details = dbc.Button(
-                    "Voir détails",
-                    id={"type": "flow-details-btn", "index": flow_id},
-                    color="info",
-                    size="sm",
-                    className="me-2"
-                )
+
 
                 # Create the row
                 row = html.Tr([
@@ -1547,8 +1699,8 @@ class UltimateNetworkApp:
                     html.Td(flow_id),
                     html.Td(src_dst),
                     html.Td(prediction_badge),
-                    html.Td(reported_at),
-                    html.Td(details)
+                    html.Td(label_humain),
+                    html.Td(reported_at)
                 ])
                 rows.append(row)
 
@@ -1564,6 +1716,7 @@ class UltimateNetworkApp:
             )
 
             return table
+
 
         # Handle flow selection
         @callback(
@@ -1640,7 +1793,7 @@ class UltimateNetworkApp:
         # Handle flow selection on analysis page
         @callback(
             Output("analysis-selected-flows", "data"),
-            Input({"type": "flow-select-checkbox", "index": dash.ALL}, "checked"),
+            Input({"type": "flow-select-checkbox", "index": dash.ALL}, "value"),
             State({"type": "flow-select-checkbox", "index": dash.ALL}, "id"),
             State("analysis-selected-flows", "data"),
             prevent_initial_call=True
@@ -1656,6 +1809,9 @@ class UltimateNetworkApp:
                     elif not checked and flow_key in selected_flows:
                         selected_flows.remove(flow_key)
 
+            print("Nouvelle sélection de flows sur analysis :", selected_flows)
+            print("checkbox_ids =", checkbox_ids)
+            print("checked_values =", checked_values)
             return selected_flows
 
         # Show export confirmation modal on analysis page
@@ -1690,6 +1846,7 @@ class UltimateNetworkApp:
             prevent_initial_call=True
         )
         def handle_analysis_export(n_clicks, selected_flows, session_data):
+            print("selected_flows reçus pour export :", selected_flows)
             if not n_clicks or not selected_flows:
                 return no_update
 
@@ -1711,6 +1868,7 @@ class UltimateNetworkApp:
                 terminated_flows = capture_manager.flow_aggregator.get_terminated_flows(limit=100)
                 for flow in terminated_flows:
                     if flow.get('flow_key', '') == flow_key:
+                        print(f"Flow trouvé pour export: {flow}")
                         # Store the flow in the database first
                         self.store_reported_flow(flow, user.user_id)
                         flows_to_export.append(flow_key)
@@ -1727,7 +1885,7 @@ class UltimateNetworkApp:
             flow_ids = []
 
             for flow_key in flows_to_export:
-                cursor.execute("SELECT id FROM reported_flows WHERE flow_key = ? AND user_id = ? ORDER BY reported_at DESC LIMIT 1", 
+                cursor.execute("SELECT id FROM reported_flows WHERE flow_key = ? AND user_id = ? ORDER BY reported_at DESC LIMIT 1",
                               (flow_key, user.user_id))
                 result = cursor.fetchone()
                 if result:
@@ -1801,12 +1959,30 @@ class UltimateNetworkApp:
         ], width=3)
 
     def create_live_flows_table(self, flows):
-        if not flows:
-            return dbc.Alert("📭 Aucun flow actif", color="info")
+        # Ne garder que les flows terminés
+        terminated_flows = [flow for flow in flows if flow.get('status') == 'terminated']
 
-        # Préparer les données pour le tableau
+        # On ajoute à la mémoire persistante
+        for flow in terminated_flows:
+            # Pour éviter les doublons, on peut vérifier via le flow_key
+            if flow.get('flow_key') not in [f.get('flow_key') for f in self.last_terminated_flows]:
+                self.last_terminated_flows.append(flow)
+        # On garde seulement les 20 derniers
+        self.last_terminated_flows = self.last_terminated_flows[-20:]
+
+        # Utilise la mémoire persistante pour l'affichage
+        if not self.last_terminated_flows:
+            return dbc.Alert("📭 Aucun flow terminé", color="info")
+
         table_data = []
-        for flow in flows[-20:]:  # 20 derniers flows
+        for flow in self.last_terminated_flows[::-1]:  # Plus récent en haut
+            pred = flow.get('prediction', '').strip().lower()
+            if not pred:
+                pred_affiche = "Analyse en cours…"
+            elif pred not in ['mal', 'normal']:
+                pred_affiche = "Inconnu"
+            else:
+                pred_affiche = pred.capitalize()
             table_data.append({
                 'flow_key': flow.get('flow_key', 'Unknown')[:30] + '...' if len(
                     flow.get('flow_key', '')) > 30 else flow.get('flow_key', 'Unknown'),
@@ -1817,7 +1993,7 @@ class UltimateNetworkApp:
                 'bytes': flow.get('total_bytes', 0),
                 'packets': flow.get('pkt_count', 0),
                 'duration': f"{flow.get('duration_ms', 0):.1f}ms",
-                'status': flow.get('status', 'unknown')
+                'prediction': pred_affiche
             })
 
         return dash_table.DataTable(
@@ -1832,18 +2008,27 @@ class UltimateNetworkApp:
                 {'name': 'Bytes', 'id': 'bytes'},
                 {'name': 'Pkts', 'id': 'packets'},
                 {'name': 'Durée', 'id': 'duration'},
-                {'name': 'État', 'id': 'status'}
+                {'name': 'Prédiction', 'id': 'prediction'},
             ],
             style_cell={'textAlign': 'left', 'fontSize': '11px', 'padding': '5px'},
             style_header={'backgroundColor': 'rgb(230, 230, 230)', 'fontWeight': 'bold'},
             style_data_conditional=[
                 {
-                    'if': {'filter_query': '{status} = active'},
-                    'backgroundColor': '#e8f5e8',
+                    'if': {'filter_query': '{prediction} = Mal'},
+                    'backgroundColor': '#ffdddd',
+                    'color': 'black',
+                    'fontWeight': 'bold'
                 },
                 {
-                    'if': {'filter_query': '{status} = terminated'},
-                    'backgroundColor': '#ffe8e8',
+                    'if': {'filter_query': '{prediction} = Normal'},
+                    'backgroundColor': '#ddffdd',
+                    'color': 'black',
+                    'fontWeight': 'bold'
+                },
+                {
+                    'if': {'filter_query': '{prediction} = inconnu'},
+                    'backgroundColor': '#f5f5f5',
+                    'color': '#888888',
                 },
                 {
                     'if': {'filter_query': '{protocol} = TCP'},
@@ -1858,6 +2043,7 @@ class UltimateNetworkApp:
             page_size=15,
             style_table={'overflowX': 'auto', 'height': '400px', 'overflowY': 'auto'}
         )
+
 
     def create_traffic_chart(self, flows):
         if not flows:
@@ -2122,6 +2308,47 @@ class UltimateNetworkApp:
                     ])
                 ], width=12)
             ], className="mb-4"),
+
+            dbc.Row([
+                            dbc.Col([
+                                dbc.Card([
+                                    dbc.CardBody([
+                                        html.H4("Débit Actuel", className="card-title"),
+                                        html.H2(id="debit-actuel-value", className="card-text", style={"color": "#3B82F6"}),
+                                        html.Div("📡", style={"fontSize": "2rem"})
+                                    ])
+                                ], color="light")
+                            ], width=3),
+                            dbc.Col([
+                                dbc.Card([
+                                    dbc.CardBody([
+                                        html.H4("Sessions Actives", className="card-title"),
+                                        html.H2(id="sessions-actives-value", className="card-text", style={"color": "#6366F1"}),
+                                        html.Div("👥", style={"fontSize": "2rem"})
+                                    ])
+                                ], color="light")
+                            ], width=3)
+                            #dbc.Col([
+                            #    dbc.Card([
+                            #        dbc.CardBody([
+                            #            html.H4("Connexions Anormales", className="card-title"),
+                            #            html.H2(id="connexions-anormales-value", className="card-text", style={"color": "#DC2626"}),
+                            #            html.Div("🚨", style={"fontSize": "2rem"})
+                            #        ])
+                            #    ], color="light")
+                            #], width=3)
+                        ], className="mb-4"),
+
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Card([
+                                    dbc.CardHeader("🌐 Top 5 IP Sources les plus actives"),
+                                    dbc.CardBody([
+                                        dcc.Graph(id='top-ips-chart', style={'height': '350px'})
+                                    ])
+                                ])
+                            ], width=12)
+                        ], className="mb-4"),
 
             # Flows en temps réel
             dbc.Row([
@@ -2388,9 +2615,9 @@ class UltimateNetworkApp:
                                 ], width=6)
                             ]),
                             dbc.Button(
-                                "🔄 Rafraîchir", 
-                                id="refresh-reported-flows", 
-                                color="primary", 
+                                "🔄 Rafraîchir",
+                                id="refresh-reported-flows",
+                                color="primary",
                                 className="mt-3"
                             )
                         ])
@@ -2406,7 +2633,7 @@ class UltimateNetworkApp:
                             html.Div([
                                 html.Span("📋 Flows Signalés", className="me-auto"),
                                 dbc.Button(
-                                    "📤 Exporter Sélection", 
+                                    "📤 Exporter Sélection",
                                     id="export-selected-btn",
                                     color="success",
                                     className="ms-2"
