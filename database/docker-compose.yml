@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  # Base de données PostgreSQL simple
+  postgres:
+    image: postgres:15-alpine
+    container_name: network_db
+    env_file:
+      - ./.env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-networkdb}
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - network_db_network
+
+networks:
+  network_db_network:
+    name: network_db_network
+
+volumes:
+  postgres_data:
