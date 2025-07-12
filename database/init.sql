@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS reported_flows (
     total_bytes BIGINT,
     pkt_count INTEGER,
     prediction TEXT,
-    label_humain TEXT
+    label_humain TEXT,
     user_id TEXT,
     reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     flow_data TEXT
