@@ -31,6 +31,16 @@ from alerting import process_new_flow_for_alerting
 from openai import OpenAI
 from dotenv import load_dotenv
 import httpx
+import logging
+
+# Import the models and managers
+from models_and_managers import User, UserSession
+
+# Import the PostgreSQLUserManager (required)
+from db_user_manager import PostgreSQLUserManager
+HAS_POSTGRES_USER_MANAGER = True
+
+
 
 load_dotenv()
 
@@ -82,132 +92,6 @@ def resumer_texte(texte, modele="gpt-3.5-turbo"):
         return response.choices[0].message.content.strip()
     except Exception as e:
         return f"Erreur de résumé : {e}"
-
-# =====================================
-# SYSTÈME MULTI-UTILISATEURS INTÉGRÉ
-# =====================================
-
-@dataclass
-class User:
-    user_id: str
-    username: str
-    email: str
-    password_hash: str
-    created_at: datetime
-    last_login: Optional[datetime] = None
-    is_active: bool = True
-    role: str = 'user'
-
-
-@dataclass
-class UserSession:
-    session_id: str
-    user_id: str
-    username: str
-    created_at: datetime
-    last_activity: datetime
-    ip_address: str
-    expires_at: datetime
-
-
-class UserManager:
-    def __init__(self, session_timeout_hours=24):
-        self.users: Dict[str, User] = {}
-        self.usernames: Dict[str, str] = {}
-        self.sessions: Dict[str, UserSession] = {}
-        self.session_timeout = timedelta(hours=session_timeout_hours)
-        self.lock = threading.Lock()
-        self._create_default_admin()
-
-    def _create_default_admin(self):
-        admin_id = str(uuid.uuid4())
-        password_hash = hashlib.sha256("admin123".encode()).hexdigest()
-
-        admin = User(
-            user_id=admin_id,
-            username="admin",
-            email="admin@localhost",
-            password_hash=password_hash,
-            created_at=datetime.now(),
-            role="admin"
-        )
-
-        self.users[admin_id] = admin
-        self.usernames["admin"] = admin_id
-        print("👑 Admin créé - Username: admin, Password: admin123")
-
-    def authenticate(self, username: str, password: str, ip_address: str = "unknown") -> Optional[str]:
-        with self.lock:
-            if username not in self.usernames:
-                return None
-
-            user_id = self.usernames[username]
-            user = self.users[user_id]
-
-            password_hash = hashlib.sha256(password.encode()).hexdigest()
-            if user.password_hash != password_hash or not user.is_active:
-                return None
-
-            session_id = str(uuid.uuid4())
-            now = datetime.now()
-
-            session = UserSession(
-                session_id=session_id,
-                user_id=user_id,
-                username=username,
-                created_at=now,
-                last_activity=now,
-                ip_address=ip_address,
-                expires_at=now + self.session_timeout
-            )
-
-            self.sessions[session_id] = session
-            user.last_login = now
-            return session_id
-
-    def get_user_by_session(self, session_id: str) -> Optional[User]:
-        with self.lock:
-            if session_id not in self.sessions:
-                return None
-
-            session = self.sessions[session_id]
-            now = datetime.now()
-
-            if now > session.expires_at:
-                del self.sessions[session_id]
-                return None
-
-            session.last_activity = now
-            return self.users.get(session.user_id)
-
-    def register_user(self, username: str, email: str, password: str, role: str = "user") -> bool:
-        with self.lock:
-            if username in self.usernames:
-                return False
-
-            user_id = str(uuid.uuid4())
-            password_hash = hashlib.sha256(password.encode()).hexdigest()
-
-            user = User(
-                user_id=user_id,
-                username=username,
-                email=email,
-                password_hash=password_hash,
-                created_at=datetime.now(),
-                role=role
-            )
-
-            self.users[user_id] = user
-            self.usernames[username] = user_id
-            return True
-
-    def logout(self, session_id: str) -> bool:
-        with self.lock:
-            if session_id in self.sessions:
-                del self.sessions[session_id]
-                return True
-            return False
-
 
 # =====================================
 # FLOW AGGREGATOR INTÉGRÉ
@@ -602,7 +486,13 @@ def ssh_capture_thread(capture_manager, hostname, username, key_file, interface_
 
 class UltimateNetworkApp:
     def __init__(self):
-        self.user_manager = UserManager()
+        # Use only PostgreSQLUserManager without fallback to in-memory
+        if not HAS_POSTGRES_USER_MANAGER:
+            raise ImportError("PostgreSQLUserManager is required but not available")
+
+        self.user_manager = PostgreSQLUserManager(fallback_to_memory=False)
+        logging.info("Using PostgreSQL for user management (no fallback to memory)")
+
         self.user_captures: Dict[str, UserCaptureManager] = {}
 
         self.app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP],suppress_callback_exceptions=True)
@@ -616,6 +506,25 @@ class UltimateNetworkApp:
         self.setup_callbacks()
 
         self.last_terminated_flows = []
+
+        # Set up periodic cleanup of expired sessions
+        self.session_cleanup_thread = threading.Thread(
+            target=self._session_cleanup_worker,
+            daemon=True
+        )
+        self.session_cleanup_thread.start()
+
+    def _session_cleanup_worker(self):
+        """Worker thread to periodically clean up expired sessions"""
+        while True:
+            try:
+                # Clean up expired sessions every hour
+                time.sleep(3600)
+                self.user_manager.cleanup_expired_sessions()
+                logging.info("Cleaned up expired sessions")
+            except Exception as e:
+                logging.error(f"Error in session cleanup: {e}")
+                time.sleep(60)  # Wait a bit before retrying
 
     def get_db_connection(self):
         """Get a connection to the PostgreSQL database"""
