@@ -640,6 +640,7 @@ class UltimateNetworkApp:
                 total_bytes BIGINT,
                 pkt_count INTEGER,
                 prediction TEXT,
+                label_humain TEXT,
                 user_id TEXT,
                 reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 flow_data TEXT
@@ -663,17 +664,17 @@ class UltimateNetworkApp:
 
             # Inverser la prédiction
             if flow.get('prediction') == 'Mal':
-                flow['prediction'] = 'Normal'
+                label_humain = 'Normal'
             elif flow.get('prediction') == 'Normal':
-                flow['prediction'] = 'Mal'
+                label_humain = 'Mal'
 
             # Convert the entire flow dict to JSON for storage
             flow_data = json.dumps(flow)
 
             cursor.execute('''
             INSERT INTO reported_flows 
-            (flow_key, src_ip, dst_ip, sport, dport, protocol, total_bytes, pkt_count, prediction, user_id, flow_data)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (flow_key, src_ip, dst_ip, sport, dport, protocol, total_bytes, pkt_count, prediction, label_humain, user_id, flow_data)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''', (
                 flow.get('flow_key', ''),
                 flow.get('src_ip', ''),
@@ -684,6 +685,7 @@ class UltimateNetworkApp:
                 flow.get('total_bytes', 0),
                 flow.get('pkt_count', 0),
                 flow.get('prediction', ''),
+                label_humain,
                 user_id,
                 flow_data
             ))
@@ -1315,6 +1317,10 @@ class UltimateNetworkApp:
                         ml_features['prediction'] = str(prediction)
                         flow['prediction'] = str(prediction)  # Store prediction in flow data
 
+                        # Injecter ces deux features dans le flow lui-même
+                        flow["flow_pkts_per_s"] = ml_features["flow_pkts_per_s"]
+                        flow["fwd_bwd_ratio"] = ml_features["fwd_bwd_ratio"]
+
                         print("flow type :", type(flow))
                         flow_summary = ""
                         if flow["prediction"] == "Mal":
@@ -1670,8 +1676,10 @@ class UltimateNetworkApp:
                     html.Th("ID", style={'width': '5%'}),
                     html.Th("Source → Destination", style={'width': '25%'}),
                     html.Th("Prédiction", style={'width': '15%'}),
-                    html.Th("Date signalé", style={'width': '15%'}),
-                    html.Th("Détails", style={'width': '30%'})
+                    html.Td("Label humain", style={'width': '15%'}),
+                    html.Th("Date signalé", style={'width': '15%'})
+                    # ,
+                    # html.Th("Détails", style={'width': '30%'})
                 ]))
             ]
 
@@ -1685,6 +1693,7 @@ class UltimateNetworkApp:
                 dport = flow.get('dport', 'N/A')
                 protocol = flow.get('protocol', 'N/A')
                 prediction = flow.get('prediction', 'N/A')
+                label_humain = flow.get('label_humain', 'N/A')
                 reported_at = flow.get('reported_at', 'N/A')
 
                 # Format source to destination
@@ -1699,13 +1708,13 @@ class UltimateNetworkApp:
                     prediction_badge = html.Span(prediction, className="badge bg-danger")
 
                 # Create a collapsible details section
-                details = dbc.Button(
-                    "Voir détails",
-                    id={"type": "flow-details-btn", "index": flow_id},
-                    color="info",
-                    size="sm",
-                    className="me-2"
-                )
+                # details = dbc.Button(
+                #     "Voir détails",
+                #     id={"type": "flow-details-btn", "index": flow_id},
+                #     color="info",
+                #     size="sm",
+                #     className="me-2"
+                # )
 
                 # Create the row
                 row = html.Tr([
@@ -1717,8 +1726,10 @@ class UltimateNetworkApp:
                     html.Td(flow_id),
                     html.Td(src_dst),
                     html.Td(prediction_badge),
-                    html.Td(reported_at),
-                    html.Td(details)
+                    html.Td(label_humain),
+                    html.Td(reported_at)
+                    # ,
+                    # html.Td(details)
                 ])
                 rows.append(row)
 
