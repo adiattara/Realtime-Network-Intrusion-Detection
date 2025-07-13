@@ -1,0 +1,31 @@
+# Dockerfile.producer
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install kafka-python
+RUN pip install --no-cache-dir kafka-python
+
+# Copy the producer script and related files
+COPY kafka_packet_producer.py .
+COPY kafka_command_listener.py .
+COPY network_utils.py .
+COPY .env .
+
+# Create directory for SSH keys
+RUN mkdir -p /app/ssh_keys
+
+# Set permissions for SSH keys
+RUN chmod 700 /app/ssh_keys
+
+# Set the entrypoint
+ENTRYPOINT ["python", "kafka_command_listener.py"]

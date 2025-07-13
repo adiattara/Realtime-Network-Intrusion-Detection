@@ -1,0 +1,23 @@
+# Dockerfile.consumer
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install kafka-python
+RUN pip install --no-cache-dir kafka-python
+
+# Copy the consumer script and related files
+COPY kafka_packet_consumer.py .
+COPY alerting.py .
+COPY .env .
+
+# Set the entrypoint
+ENTRYPOINT ["python", "kafka_packet_consumer.py"]

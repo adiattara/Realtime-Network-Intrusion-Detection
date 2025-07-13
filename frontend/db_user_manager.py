@@ -73,6 +73,9 @@ class PostgreSQLUserManager:
         try:
             cursor = conn.cursor()
 
+            # Ensure tables exist
+            self._ensure_tables_exist(cursor)
+
             # Check if admin user exists
             cursor.execute("SELECT user_id FROM users WHERE username = %s", ("admin",))
             admin = cursor.fetchone()
@@ -139,6 +142,9 @@ class PostgreSQLUserManager:
 
         try:
             cursor = conn.cursor(cursor_factory=extras.DictCursor)
+
+            # Ensure tables exist
+            self._ensure_tables_exist(cursor)
 
             # Check if user exists and password is correct
             cursor.execute("""
@@ -229,6 +235,9 @@ class PostgreSQLUserManager:
 
         try:
             cursor = conn.cursor(cursor_factory=extras.DictCursor)
+
+            # Ensure tables exist
+            self._ensure_tables_exist(cursor)
 
             # Get the session
             cursor.execute("""
@@ -323,6 +332,9 @@ class PostgreSQLUserManager:
 
         try:
             cursor = conn.cursor()
+
+            # Ensure tables exist
+            self._ensure_tables_exist(cursor)
 
             # Check if username already exists
             cursor.execute("""
@@ -439,6 +451,50 @@ class PostgreSQLUserManager:
             logger.error(f"Error cleaning up expired sessions: {e}")
             if conn:
                 conn.close()
+
+    def _ensure_tables_exist(self, cursor):
+        """Ensure that the required tables exist in the database"""
+        try:
+            # Create users table if it doesn't exist
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                email TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                last_login TIMESTAMP,
+                is_active BOOLEAN DEFAULT TRUE,
+                role TEXT DEFAULT 'user'
+            )
+            """)
+
+            # Create user_sessions table if it doesn't exist
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                session_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                username TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                last_activity TIMESTAMP NOT NULL,
+                ip_address TEXT NOT NULL,
+                expires_at TIMESTAMP NOT NULL
+            )
+            """)
+
+            # Create indexes if they don't exist
+            cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id)
+            """)
+
+            cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at ON user_sessions(expires_at)
+            """)
+
+            logger.info("Database tables and indexes created or verified")
+        except Exception as e:
+            logger.error(f"Error ensuring tables exist: {e}")
+            raise
 
     def sync_to_database(self):
         """

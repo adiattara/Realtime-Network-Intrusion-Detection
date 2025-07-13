@@ -1,152 +1,280 @@
-version: "3.9"
-
-networks:
-  benign-net:
-    driver: bridge
-    name: benign-net
-    driver_opts:
-      com.docker.network.bridge.name: br-benign
-    ipam:
-      config:
-        - subnet: 172.30.0.0/16    # Trafic normal
-  attack-net:
-    driver: bridge
-    name: attack-net
-    driver_opts:
-      com.docker.network.bridge.name: br-attack
-    ipam:
-      config:
-        - subnet: 172.31.0.0/16
+version: '3.8'
 
 services:
-  # Serveur HTTP (victime)
-  web:
-    image: nginx:alpine
-    networks:
-      - benign-net
-      - attack-net
-    ports:
-      - "8081:80"
-
-  # Serveur FTP (victime)
-  ftp:
-    image: fauria/vsftpd
-    networks:
-      - benign-net
-      - attack-net
+  # Base de données PostgreSQL simple
+  postgres:
+    image: postgres:15-alpine
+    container_name: network_db
+    env_file:
+      - ./database/.env
     environment:
-      - FTP_USER=user
-      - FTP_PASS=pass
-      - LOG_STDOUT=Yes
+      POSTGRES_DB: ${POSTGRES_DB:-networkdb}
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
     volumes:
-      - ./ftpdata:/home/vsftpd
-
-  # Serveur SSH (victime)
-  ssh:
-    image: linuxserver/openssh-server
-    networks:
-      - benign-net
-      - attack-net
-    environment:
-      - PASSWORD_ACCESS=true
-      - USER_NAME=test
-      - PASSWORD=test
-      - SUDO_ACCESS=false
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
-      - "2222:2222"
-
-  # Générateur de trafic HTTP
-  benign-http:
-    image: curlimages/curl
+      - "5432:5432"
+    restart: unless-stopped
     networks:
-      - benign-net
+      - network_db_network
+
+  # Zookeeper (required for Kafka)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - network_db_network
+
+  # Kafka broker
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    container_name: kafka
     depends_on:
-      - web
-    command: >
-      sh -c "while true; do curl -s http://web > /dev/null; sleep 1; done"
-
-  # Générateur de trafic FTP
-  benign-ftp:
-    image: curlimages/curl
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     networks:
-      - benign-net
+      - network_db_network
+
+  # 1. dash-ui (interface principale)
+  dash-ui:
+    build: ./frontend
+    container_name: dash_ui
+    env_file:
+      - ./frontend/.env
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql://user:password@network_db:5432/networkdb}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - BOT_EMAIL=${BOT_EMAIL:-}
+      - BOT_APP_PASSWORD=${BOT_APP_PASSWORD:-}
+      - API_URL=${API_URL:-}
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      - KAFKA_TOPIC=${KAFKA_TOPIC:-raw-packets}
+      - KAFKA_OUTPUT_TOPIC=${KAFKA_OUTPUT_TOPIC:-aggregated-flows}
+      - KAFKA_COMMANDS_TOPIC=${KAFKA_COMMANDS_TOPIC:-capture-commands}
+      - KAFKA_PREDICTED_TOPIC=${KAFKA_PREDICTED_TOPIC:-predicted-flows}
+    volumes:
+      - ./ssh_keys:/app/ssh_keys:rw
+    ports:
+      - "8050:8050"
+    networks:
+      - network_db_network
     depends_on:
-      - ftp
-    command: >
-      sh -c "while true; do curl -s ftp://user:pass@ftp/ > /dev/null; sleep 2; done"
+      - postgres
+      - kafka
+    restart: unless-stopped
 
-  # Générateur de trafic SSH
-  benign-ssh:
-    image: alpine
+  # 2. capture-service (SSH → Kafka)
+  capture-service:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.producer
+    container_name: capture_service
+    env_file:
+      - ./frontend/.env
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      - KAFKA_TOPIC=${KAFKA_TOPIC:-raw-packets}
+      - KAFKA_COMMANDS_TOPIC=${KAFKA_COMMANDS_TOPIC:-capture-commands}
+    volumes:
+      - ./ssh_keys:/app/ssh_keys:rw
     networks:
-      - benign-net
+      - network_db_network
     depends_on:
-      - ssh
-    command: >
-      sh -c "apk add --no-cache openssh-client sshpass && \
-      while true; do \
-        sshpass -p test ssh -o StrictHostKeyChecking=no test@ssh -p 2222 'echo hello' > /dev/null 2>&1 || true; \
-        sleep 3; \
-      done"
+      - kafka
+    restart: unless-stopped
+    # The command will be provided by the capture-commands topic
 
-  # Générateur de requêtes DNS valides
-  benign-dns:
-    image: busybox
+  # 3. aggregator-service (Packets → Flows)
+  aggregator-service:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.consumer
+    container_name: aggregator_service
+    env_file:
+      - ./frontend/.env
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      - KAFKA_TOPIC=${KAFKA_TOPIC:-raw-packets}
+      - KAFKA_OUTPUT_TOPIC=${KAFKA_OUTPUT_TOPIC:-aggregated-flows}
     networks:
-      - benign-net
-    command: >
-      sh -c "while true; do nslookup google.com > /dev/null; sleep 4; done"
+      - network_db_network
+    depends_on:
+      - kafka
+    restart: unless-stopped
+    command: ["--bootstrap-servers", "kafka:9092", "--input-topic", "raw-packets", "--output-topic", "aggregated-flows"]
 
+  # 3b. spark-aggregator-service (Packets → Flows using Spark)
+  spark-aggregator-service:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.spark
+    container_name: spark_aggregator_service
+    env_file:
+      - ./frontend/.env
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      - KAFKA_TOPIC=${KAFKA_TOPIC:-raw-packets}
+      - KAFKA_OUTPUT_TOPIC=${KAFKA_OUTPUT_TOPIC:-aggregated-flows}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://user:password@network_db:5432/networkdb}
+    volumes:
+      - /tmp/checkpoint_networkflow_pg:/tmp/checkpoint_networkflow_pg
+      - ./chk_kafka:/app/chk_kafka
+    networks:
+      - network_db_network
+    depends_on:
+      - kafka
+      - postgres
+    restart: unless-stopped
 
-  # ─── Attaques ────────────────────────────────
-#  attacker-httpflood:
-#    image: williamyeh/wrk
-#    networks:
-#      - attack-net
-#    entrypoint: /bin/sh
-#    command:
-#      - -c
-#      - |
-#        while true; do
-#          echo "[+] wrk burst…"
-#          wrk -t2 -c200 -d60s http://web:80/
-#          sleep 5
-#        done
-#
-#  attacker-ddos:
-#    image: ubuntu:22.04
-#    networks:
-#      - attack-net
-#    command:
-#      - bash
-#      - -c
-#      - |
-#        set -e &&
-#        export DEBIAN_FRONTEND=noninteractive &&
-#        apt-get update -qq &&
-#        apt-get install -yqq siege &&
-#        echo '[+] siege loop…' &&
-#        while true; do
-#          siege -q -b -c 200 -t 60S http://web:80/ || true
-#          sleep 5
-#        done
-#  attacker-portscan:
-#    image: ubuntu:22.04
-#    networks:
-#      - attack-net
-#    command:
-#      - bash
-#      - -c
-#      - |
-#        set -e &&
-#        export DEBIAN_FRONTEND=noninteractive &&
-#        apt-get update -qq &&
-#        apt-get install -yqq nmap &&
-#        echo '[+] looped SYN scan every 30 s' &&
-#        while true; do
-#          TS=$(date '+%F %T')
-#          echo "--- $TS : scan start ---"
-#          nmap -sS -T4 -p- web -oG - | grep -v '^#'
-#          echo "--- $TS : scan end ---"
-#          sleep 30
-#        done
+  # 4. ml-service (Flows → Prédictions)
+  ml-service:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.consumer
+    container_name: ml_service
+    env_file:
+      - ./frontend/.env
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      - KAFKA_TOPIC=${KAFKA_OUTPUT_TOPIC:-aggregated-flows}
+      - KAFKA_OUTPUT_TOPIC=${KAFKA_PREDICTED_TOPIC:-predicted-flows}
+      - API_URL=${API_URL:-https://realtime-network-intrusion-detection-8itu.onrender.com/predict}
+    networks:
+      - network_db_network
+    depends_on:
+      - kafka
+      - aggregator-service
+    restart: unless-stopped
+    command: ["--bootstrap-servers", "kafka:9092", "--input-topic", "aggregated-flows", "--output-topic", "predicted-flows"]
+
+  # 5. alerting-service (Prédictions → Emails)
+  alerting-service:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.consumer
+    container_name: alerting_service
+    env_file:
+      - ./frontend/.env
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      - KAFKA_TOPIC=${KAFKA_PREDICTED_TOPIC:-predicted-flows}
+      - BOT_EMAIL=${BOT_EMAIL:-}
+      - BOT_APP_PASSWORD=${BOT_APP_PASSWORD:-}
+    networks:
+      - network_db_network
+    depends_on:
+      - kafka
+      - ml-service
+    restart: unless-stopped
+    command: ["--bootstrap-servers", "kafka:9092", "--input-topic", "predicted-flows"]
+
+  # 6. kafka-ui (Visualisation des topics Kafka)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka_ui
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=NetworkAnalysis
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+      - KAFKA_CLUSTERS_0_ZOOKEEPER=zookeeper:2181
+    ports:
+      - "8080:8080"
+    networks:
+      - network_db_network
+    depends_on:
+      - kafka
+    restart: unless-stopped
+
+  # Dagster PostgreSQL database
+  dagster_postgresql:
+    image: postgres:14
+    container_name: dagster_postgresql
+    environment:
+      POSTGRES_USER: ${DAGSTER_POSTGRES_USER:-dagster}
+      POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD:-dagster}
+      POSTGRES_DB: ${DAGSTER_POSTGRES_DB:-dagster}
+    networks:
+      - dags_network
+      - network_db_network
+    expose:
+      - 5432
+    ports:
+      - "5436:5432"
+    restart: unless-stopped
+
+  # Dagster web server
+  dags_server:
+    build:
+      context: ./dagster_Job
+    entrypoint:
+      - dagster-webserver
+      - -h
+      - "0.0.0.0"
+      - -p
+      - "3000"
+    ports:
+      - "3000:3000"
+    environment:
+      POSTGRES_USER: ${DAGSTER_POSTGRES_USER:-dagster}
+      POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD:-dagster}
+      POSTGRES_DB: ${DAGSTER_POSTGRES_DB:-dagster}
+      POSTGRES_HOST: ${DAGSTER_POSTGRES_HOST:-dagster_postgresql}
+    expose:
+      - "3000"
+    networks:
+      - dags_network
+      - network_db_network
+    depends_on:
+      - dagster_postgresql
+    restart: unless-stopped
+
+  # Dagster daemon
+  docker_dagster_daemon:
+    build:
+      context: ./dagster_Job
+    entrypoint:
+      - dagster-daemon
+      - run
+    restart: on-failure
+    env_file:
+      - ./dagster_Job/.env
+    environment:
+      POSTGRES_USER: ${DAGSTER_POSTGRES_USER:-dagster}
+      POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD:-dagster}
+      POSTGRES_DB: ${DAGSTER_POSTGRES_DB:-dagster}
+      POSTGRES_HOST: ${DAGSTER_POSTGRES_HOST:-dagster_postgresql}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/io_manager_storage:/tmp/io_manager_storage
+    networks:
+      - dags_network
+      - network_db_network
+    depends_on:
+      - dagster_postgresql
+    restart: unless-stopped
+
+networks:
+  network_db_network:
+    name: network_db_network
+  dags_network:
+    driver: bridge
+    name: dags_network
+
+volumes:
+  postgres_data:

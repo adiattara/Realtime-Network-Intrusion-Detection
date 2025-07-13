@@ -40,6 +40,9 @@ from models_and_managers import User, UserSession
 from db_user_manager import PostgreSQLUserManager
 HAS_POSTGRES_USER_MANAGER = True
 
+# Import the KafkaUserCaptureManager for Kafka integration
+from kafka_user_capture_manager import KafkaUserCaptureManager
+
 
 
 load_dotenv()
@@ -467,7 +470,7 @@ def ssh_capture_thread(capture_manager, hostname, username, key_file, interface_
                 current_ts = new_ts
 
             if packet_info:
-                flow = capture_manager.flow_aggregator.process_packet(packet_info)
+                flow = capture_manager.process_packet(packet_info)
                 if flow:
                     capture_manager.flow_queue.put(flow)
                 current_ts = None
@@ -755,7 +758,8 @@ class UltimateNetworkApp:
 
         if user.user_id not in self.user_captures:
             # on passe aussi l'email pour l'alerte
-            self.user_captures[user.user_id] = UserCaptureManager(
+            # Use KafkaUserCaptureManager instead of UserCaptureManager for Kafka integration
+            self.user_captures[user.user_id] = KafkaUserCaptureManager(
                 user.user_id,
                 user.email
             )
@@ -768,7 +772,7 @@ class UltimateNetworkApp:
             dcc.Store(id='session-store', storage_type='session'),
             dcc.Store(id='ssh-key-content', data=None),
             dcc.Store(id='ssh-key-filename', data=None),
-            dcc.Interval(id='main-interval', interval=1000, n_intervals=0, disabled=True),
+            dcc.Interval(id='main-interval', interval=5000, n_intervals=0, disabled=True),
             html.Div(
                 dash_table.DataTable(id='flows-table', data=[]),
                 style={'display': 'none'}
@@ -894,15 +898,23 @@ class UltimateNetworkApp:
                     is_valid_key = any(pattern in decoded_str for pattern in valid_key_patterns)
 
                     if is_valid_key:
-                        temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False)
-                        temp_file.write(decoded_str)
-                        temp_file.close()
-                        os.chmod(temp_file.name, 0o600)
+                        # Utiliser un nom de fichier sécurisé basé sur le nom original
+                        safe_filename = os.path.basename(filename)
+                        # Ajouter un timestamp pour éviter les collisions
+                        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                        key_path = f"/app/ssh_keys/{timestamp}_{safe_filename}"
+
+                        # Écrire la clé dans le répertoire ssh_keys
+                        with open(key_path, 'w') as f:
+                            f.write(decoded_str)
+
+                        # Définir les permissions correctes pour la clé SSH
+                        os.chmod(key_path, 0o600)
 
                         return (
                             dbc.Alert(f"✅ Clé SSH '{filename}' chargée avec succès", color="success"),
                             decoded_str,
-                            temp_file.name
+                            key_path
                         )
                     else:
                         return (
@@ -1025,13 +1037,15 @@ class UltimateNetworkApp:
                         except:
                             pass  # Ignore errors when closing
 
-                    capture_manager.connection_active = True
-                    capture_manager.ssh_thread = threading.Thread(
-                        target=ssh_capture_thread,
-                        args=(capture_manager, hostname, username, keyfile_path, interface_str, filters or ""),
-                        daemon=True
+                    success = capture_manager.start_capture(
+                        hostname=hostname,
+                        username=username,
+                        key_file=keyfile_path,
+                        interfaces=interface_str,
+                        filters=filters or ""
                     )
-                    capture_manager.ssh_thread.start()
+                    if not success:
+                        return dbc.Alert("❌ Erreur lors du démarrage de la capture", color="danger"), True, True, no_update, False
 
                     return (
                         dbc.Alert(f"🟢 Capture en cours sur {interface_str}", color="success"),
@@ -1039,15 +1053,10 @@ class UltimateNetworkApp:
                     )
 
             elif button_id == 'stop-capture-btn' and stop_clicks:
-                capture_manager.connection_active = False
-
-                # Close existing SSH client if it exists
-                if hasattr(capture_manager, 'ssh_client') and capture_manager.ssh_client:
-                    try:
-                        capture_manager.ssh_client.close()
-                        capture_manager.ssh_client = None
-                    except:
-                        pass  # Ignore errors when closing
+                # Arrêter la capture via Kafka
+                success = capture_manager.stop_capture()
+                if not success:
+                    return dbc.Alert("❌ Erreur lors de l'arrêt de la capture", color="danger"), True, True, no_update, False
 
                 return (
                     dbc.Alert("🔴 Capture arrêtée", color="warning"),
@@ -1074,16 +1083,10 @@ class UltimateNetworkApp:
             if not capture_manager:
                 return dbc.Alert("❌ Erreur utilisateur", color="danger"), True, {'display': 'none'}, True
 
-            # Arrêter la capture
-            capture_manager.connection_active = False
-
-            # Close existing SSH client if it exists
-            if hasattr(capture_manager, 'ssh_client') and capture_manager.ssh_client:
-                try:
-                    capture_manager.ssh_client.close()
-                    capture_manager.ssh_client = None
-                except:
-                    pass  # Ignore errors when closing
+            # Arrêter la capture via Kafka
+            success = capture_manager.stop_capture()
+            if not success:
+                return dbc.Alert("❌ Erreur lors de l'arrêt de la capture", color="danger"), True, {'display': 'none'}, True
 
             return (
                 dbc.Alert("🔴 Capture arrêtée depuis le dashboard", color="warning"),
@@ -1110,16 +1113,10 @@ class UltimateNetworkApp:
             if not capture_manager:
                 return dbc.Alert("❌ Erreur utilisateur", color="danger"), True, {'display': 'none'}, True
 
-            # Arrêter la capture
-            capture_manager.connection_active = False
-
-            # Close existing SSH client if it exists
-            if hasattr(capture_manager, 'ssh_client') and capture_manager.ssh_client:
-                try:
-                    capture_manager.ssh_client.close()
-                    capture_manager.ssh_client = None
-                except:
-                    pass  # Ignore errors when closing
+            # Arrêter la capture via Kafka
+            success = capture_manager.stop_capture()
+            if not success:
+                return dbc.Alert("❌ Erreur lors de l'arrêt de la capture", color="danger"), True, {'display': 'none'}, True
 
             return (
                 dbc.Alert("🔴 Capture arrêtée depuis la page d'analyse", color="warning"),
@@ -1170,7 +1167,7 @@ class UltimateNetworkApp:
                 stop_btn_style = {'display': 'none'}
 
             # Récupérer les flows terminés - augmenter la limite pour afficher plus de flows
-            terminated_flows = capture_manager.flow_aggregator.get_terminated_flows(limit=100)
+            terminated_flows = capture_manager.get_terminated_flows(limit=100)
             print("terminated_flows (raw):", terminated_flows)
 
             # Initialize displayed_flows and accumulated_flow_cards for this user if they don't exist
@@ -1361,12 +1358,15 @@ class UltimateNetworkApp:
              Output('flows-live-table', 'children'),
              Output('traffic-chart', 'figure'),
              Output('debit-actuel-value', 'children'),
-             Output('sessions-actives-value', 'children'),
+             #Output('sessions-actives-value', 'children'),
              #Output('connexions-anormales-value', 'children'),
-             Output('top-ips-chart', 'figure'),
              Output('capture-status-dashboard', 'children', allow_duplicate=True),
              Output('dashboard-stop-btn', 'disabled', allow_duplicate=True),
-             Output('dashboard-stop-btn', 'style', allow_duplicate=True)],
+             Output('dashboard-stop-btn', 'style', allow_duplicate=True),
+             Output('top-ports-chart', 'figure'),
+             Output('mal-benign-chart', 'figure'),
+             Output('throughput-history-chart', 'figure'),
+             Output('response-time-chart', 'figure')],
             Input('main-interval', 'n_intervals'),
             [State('session-store', 'data'),
              State('url', 'pathname')],
@@ -1374,11 +1374,11 @@ class UltimateNetworkApp:
         )
         def update_dashboard_live(n_intervals, session_data, pathname):
             if not session_data:
-                return [], html.P("Session expirée"), go.Figure(), no_update, no_update, no_update
+                return [], html.P("Session expirée"), go.Figure(), no_update, no_update, no_update, no_update, no_update, no_update, go.Figure(), go.Figure()
 
             capture_manager = self.get_user_capture_manager(session_data['session_id'])
             if not capture_manager:
-                return [], html.P("Erreur utilisateur"), go.Figure(), no_update, no_update, no_update
+                return [], html.P("Erreur utilisateur"), go.Figure(), no_update, no_update, no_update, no_update, no_update, no_update, go.Figure(), go.Figure()
 
             # Traitement des nouveaux flows - toujours exécuté même si l'utilisateur n'est pas sur le dashboard
             # pour continuer à collecter les données
@@ -1398,56 +1398,81 @@ class UltimateNetworkApp:
             if pathname != '/dashboard':
                 # Continuer à traiter les données mais ne pas mettre à jour l'interface
                 # Cela permet de maintenir l'état interne à jour
-                return no_update, no_update, no_update, no_update, no_update, no_update
+                return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
             # Statistiques utilisateur
-            stats = capture_manager.flow_aggregator.get_statistics()
+            stats = capture_manager.get_statistics()
             user = self.user_manager.get_user_by_session(session_data['session_id'])
 
             stats_cards = [
                 self.create_stat_card("📊 Paquets", stats['total_packets_processed'], 'primary'),
-                self.create_stat_card("🔄 Flows Actifs", stats['active_flows'], 'success'),
-                self.create_stat_card("✅ Terminés", stats['completed_flows'], 'info'),
+                self.create_stat_card("🔄 Flows", stats['total_aggregated_flows'], 'success'),
                 self.create_stat_card("👤 " + (user.username if user else "Unknown"),
                                       user.role if user else "unknown", 'secondary')
             ]
 
             # Table des flows en temps réel
-            active_flows = capture_manager.flow_aggregator.get_active_flows(limit=30)
+            active_flows = capture_manager.get_active_flows(limit=30)
             flows_table = self.create_live_flows_table(active_flows)
 
             # Graphique du trafic
             traffic_fig = self.create_traffic_chart(active_flows)
 
-            # Calcul du débit en Mbps
-            debit_bytes = sum(flow['total_bytes'] for flow in active_flows)
-            interval_s = 1  # Ajuste selon ton intervalle réel de rafraîchissement
-            debit_mbps = (debit_bytes * 8) / 1_000_000 / interval_s  # en Mbps
+            # Récupération du débit en Mbps depuis le gestionnaire Kafka
+            debit_mbps = stats['current_throughput']
 
-            # Calcul du nombre de sessions actives
-            nb_sessions = sum(1 for flow in active_flows if flow.get('status') == 'active')
+            # Graphique des paquets malicieux vs normaux
+            malicious_normal_counts = stats['malicious_normal_counts']
 
-            nb_connexions_anormales = sum(1 for flow in active_flows if flow.get('status') == 'anomalous')
+            # Récupérer à la fois les ports de destination et source
+            top_dest_ports = stats['top_dest_ports']
+            top_source_ports = stats['top_source_ports']
 
-            # Compte les IP sources
-            counter_ips = Counter(flow.get('src_ip') for flow in active_flows if flow.get('src_ip'))
-            top_ips = counter_ips.most_common(5)
-            if top_ips:
-                ips, counts = zip(*top_ips)
+            # Combiner les deux listes de ports
+            all_ports = []
+            if top_dest_ports:
+                all_ports.extend(top_dest_ports)
+            if top_source_ports:
+                all_ports.extend(top_source_ports)
+
+            # Trier par nombre de bytes et prendre les 10 premiers
+            all_ports.sort(key=lambda x: x[1], reverse=True)
+            top_ports = all_ports[:10]
+
+            # Créer le graphique
+            if top_ports:
+                ports, counts = zip(*top_ports)
+                ports = [str(port) for port in ports]  # Conversion des ports en chaînes
             else:
-                ips, counts = [], []
+                ports, counts = [], []
 
-            fig_top_ips = go.Figure()
-            fig_top_ips.add_trace(go.Bar(
+            fig_top_ports = go.Figure()
+            fig_top_ports.add_trace(go.Bar(
                 x=list(counts),
-                y=list(ips),
-                orientation='h'
+                y=list(ports),
+                orientation='h',
+                marker_color='#4CAF50'  # Couleur verte pour les ports
             ))
-            fig_top_ips.update_layout(
-                xaxis_title='Nombre de connexions',
-                yaxis_title='Adresse IP',
-                title='🌐 Top 10 IP Sources les plus actives',
+            fig_top_ports.update_layout(
+                xaxis_title='Nombre de bytes',
+                yaxis_title='Port',  # Suppression de "de destination"
+                title='🔌 Top 10 Ports',  # Titre modifié
                 yaxis={'categoryorder': 'total ascending'}
+            )
+
+            # Graphique des paquets malicieux vs normaux
+            mal_benign_labels = list(malicious_normal_counts.keys())
+            mal_benign_values = list(malicious_normal_counts.values())
+
+            fig_mal_benign = go.Figure()
+            fig_mal_benign.add_trace(go.Pie(
+                labels=mal_benign_labels,
+                values=mal_benign_values,
+                marker=dict(colors=['#FF5252', '#4CAF50']),  # Red for Mal, Green for Benign
+                textinfo='label+percent'
+            ))
+            fig_mal_benign.update_layout(
+                title='🔍 Paquets Malicieux vs Normaux'
             )
 
 
@@ -1463,7 +1488,90 @@ class UltimateNetworkApp:
                 stop_btn_disabled = True
                 stop_btn_style = {'display': 'none'}
 
-            return stats_cards, flows_table, traffic_fig, f"{debit_mbps:.2f} Mbps", nb_sessions, fig_top_ips, capture_status, stop_btn_disabled, stop_btn_style
+            # Graphique du débit moyen au cours du temps
+            throughput_history = stats.get('throughput_history', [])
+            if throughput_history:
+                timestamps, throughputs = zip(*throughput_history)
+                # Convert timestamps to readable format
+                readable_times = [datetime.fromtimestamp(ts).strftime('%H:%M:%S') for ts in timestamps]
+
+                fig_throughput_history = go.Figure()
+                fig_throughput_history.add_trace(go.Scatter(
+                    x=readable_times,
+                    y=throughputs,
+                    mode='lines+markers',
+                    name='Débit (Mbps)',
+                    line=dict(color='#3B82F6', width=2)
+                ))
+                fig_throughput_history.update_layout(
+                    xaxis_title='Temps',
+                    yaxis_title='Débit (Mbps)',
+                    title='📈 Débit Moyen du Réseau au Cours du Temps'
+                )
+            else:
+                fig_throughput_history = go.Figure()
+                fig_throughput_history.add_annotation(
+                    text="Aucune donnée de débit disponible",
+                    xref="paper", yref="paper", x=0.5, y=0.5,
+                    showarrow=False, font=dict(size=16, color="gray")
+                )
+
+            # Graphique du temps de réponse moyen au cours du temps
+            response_times = stats.get('response_times', [])
+            if response_times:
+                # Grouper les temps de réponse par intervalles de 5 secondes
+                grouped_response_times = {}
+
+                for ts, response_time in response_times:
+                    # Arrondir le timestamp à l'intervalle de 5 secondes le plus proche
+                    interval_start = int(ts / 5) * 5
+
+                    if interval_start not in grouped_response_times:
+                        grouped_response_times[interval_start] = []
+
+                    grouped_response_times[interval_start].append(response_time)
+
+                # Calculer la moyenne pour chaque intervalle
+                avg_response_times = []
+                for interval_start, times in sorted(grouped_response_times.items()):
+                    avg_time = sum(times) / len(times)
+                    avg_response_times.append((interval_start, avg_time))
+
+                # Préparer les données pour le graphique
+                if avg_response_times:
+                    timestamps, times = zip(*avg_response_times)
+                    # Convertir les timestamps en format lisible
+                    readable_times = [datetime.fromtimestamp(ts).strftime('%H:%M:%S') for ts in timestamps]
+
+                    fig_response_time = go.Figure()
+                    fig_response_time.add_trace(go.Scatter(
+                        x=readable_times,
+                        y=times,
+                        mode='lines+markers',
+                        name='Temps de réponse moyen (ms)',
+                        line=dict(color='#6366F1', width=2)
+                    ))
+                    fig_response_time.update_layout(
+                        xaxis_title='Temps (intervalles de 5s)',
+                        yaxis_title='Temps de réponse moyen (ms)',
+                        title='⏱️ Temps de Réponse Moyen du Réseau au Cours du Temps'
+                    )
+                else:
+                    fig_response_time = go.Figure()
+                    fig_response_time.add_annotation(
+                        text="Aucune donnée de temps de réponse disponible",
+                        xref="paper", yref="paper", x=0.5, y=0.5,
+                        showarrow=False, font=dict(size=16, color="gray")
+                    )
+            else:
+                fig_response_time = go.Figure()
+                fig_response_time.add_annotation(
+                    text="Aucune donnée de temps de réponse disponible",
+                    xref="paper", yref="paper", x=0.5, y=0.5,
+                    showarrow=False, font=dict(size=16, color="gray")
+                )
+
+            return stats_cards, flows_table, traffic_fig, f"{debit_mbps:.2f} Mbps", capture_status, stop_btn_disabled, stop_btn_style, fig_top_ports, fig_mal_benign, fig_throughput_history, fig_response_time
 
         # Update Capture Page Controls
         @callback(
@@ -1525,7 +1633,7 @@ class UltimateNetworkApp:
                 capture_manager = self.get_user_capture_manager(session_data['session_id'])
                 if capture_manager:
                     # Trouver le flow complet
-                    active_flows = capture_manager.flow_aggregator.get_active_flows()
+                    active_flows = capture_manager.get_active_flows()
                     selected_flow = None
                     for flow in active_flows:
                         if flow.get('flow_key') == flow_key:
@@ -1802,7 +1910,7 @@ class UltimateNetworkApp:
             flows_to_export = []
             for flow_key in selected_flows:
                 # Find the flow in terminated flows
-                terminated_flows = capture_manager.flow_aggregator.get_terminated_flows(limit=100)
+                terminated_flows = capture_manager.get_terminated_flows(limit=100)
                 for flow in terminated_flows:
                     if flow.get('flow_key', '') == flow_key:
                         # Store the flow in the database first
@@ -1866,7 +1974,7 @@ class UltimateNetworkApp:
                 return dbc.Alert("❌ Erreur: Gestionnaire de capture non disponible", color="danger")
 
             # Find the flow in terminated flows
-            terminated_flows = capture_manager.flow_aggregator.get_terminated_flows(limit=100)
+            terminated_flows = capture_manager.get_terminated_flows(limit=100)
             flow = None
             for f in terminated_flows:
                 if f.get('flow_key', '') == flow_key:
@@ -2254,15 +2362,6 @@ class UltimateNetworkApp:
                                     ])
                                 ], color="light")
                             ], width=3),
-                            dbc.Col([
-                                dbc.Card([
-                                    dbc.CardBody([
-                                        html.H4("Sessions Actives", className="card-title"),
-                                        html.H2(id="sessions-actives-value", className="card-text", style={"color": "#6366F1"}),
-                                        html.Div("👥", style={"fontSize": "2rem"})
-                                    ])
-                                ], color="light")
-                            ], width=3)
                             #dbc.Col([
                             #    dbc.Card([
                             #        dbc.CardBody([
@@ -2277,9 +2376,42 @@ class UltimateNetworkApp:
                         dbc.Row([
                             dbc.Col([
                                 dbc.Card([
-                                    dbc.CardHeader("🌐 Top 5 IP Sources les plus actives"),
+                                    dbc.CardHeader("🔌 Top 10 Ports"),  # Titre modifié
                                     dbc.CardBody([
-                                        dcc.Graph(id='top-ips-chart', style={'height': '350px'})
+                                        dcc.Graph(id='top-ports-chart', style={'height': '350px'})
+                                    ])
+                                ])
+                            ], width=12)
+                        ], className="mb-4"),
+
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Card([
+                                    dbc.CardHeader("🔍 Paquets Malicieux vs Normaux"),
+                                    dbc.CardBody([
+                                        dcc.Graph(id='mal-benign-chart', style={'height': '350px'})
+                                    ])
+                                ])
+                            ], width=12)
+                        ], className="mb-4"),
+
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Card([
+                                    dbc.CardHeader("📈 Débit Moyen du Réseau au Cours du Temps"),
+                                    dbc.CardBody([
+                                        dcc.Graph(id='throughput-history-chart', style={'height': '350px'})
+                                    ])
+                                ])
+                            ], width=12)
+                        ], className="mb-4"),
+
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Card([
+                                    dbc.CardHeader("⏱️ Temps de Réponse Moyen du Réseau au Cours du Temps"),
+                                    dbc.CardBody([
+                                        dcc.Graph(id='response-time-chart', style={'height': '350px'})
                                     ])
                                 ])
                             ], width=12)

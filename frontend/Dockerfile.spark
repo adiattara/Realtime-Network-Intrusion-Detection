@@ -1,0 +1,33 @@
+# Dockerfile.spark
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system dependencies including Java for Spark
+RUN apt-get update && apt-get install -y \
+    default-jdk \
+    && rm -rf /var/lib/apt/lists/* \
+    && java -version
+
+# Set Java home
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+# Add JVM options to allow access to required modules for Spark
+ENV JAVA_OPTS="--add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED"
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the Spark script and related files
+COPY spark_flow_aggregator.py .
+COPY entrypoint.sh .
+COPY .env .
+
+# Create checkpoint directories
+RUN mkdir -p /tmp/checkpoint_networkflow_pg chk_kafka
+
+# Make entrypoint script executable
+RUN chmod +x /app/entrypoint.sh
+
+# Set the entrypoint
+ENTRYPOINT ["/app/entrypoint.sh"]

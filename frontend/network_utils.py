@@ -141,7 +141,7 @@ def ssh_capture_thread(capture_manager, hostname, username, key_file, interface_
                 current_ts = new_ts
 
             if packet_info:
-                flow = capture_manager.flow_aggregator.process_packet(packet_info)
+                flow = capture_manager.process_packet(packet_info)
                 if flow:
                     capture_manager.flow_queue.put(flow)
                 current_ts = None
