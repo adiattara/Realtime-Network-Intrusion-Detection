@@ -28,7 +28,7 @@ from psycopg2 import extras
 from collections import Counter
 import plotly.graph_objs as go
 from alerting import process_new_flow_for_alerting
-from openai import OpenAI
+# from openai import OpenAI  # Commented out to improve performance
 from dotenv import load_dotenv
 import httpx
 import logging
@@ -48,7 +48,7 @@ load_dotenv()
 API_URL = os.environ.get('API_URL', "https://realtime-network-intrusion-detection-8itu.onrender.com/predict")
 # Create a custom httpx client without proxy settings
 http_client = httpx.Client()
-openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'), http_client=http_client)
+# openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'), http_client=http_client)  # Commented out to improve performance
 
 def predict_flow(flow_features):
     try:
@@ -67,29 +67,40 @@ def resumer_texte(texte, modele="gpt-3.5-turbo"):
     Le texte d’entrée doit être un JSON avec les features réseau + prédiction.
     """
     try:
-        response = openai_client.chat.completions.create(
-            model=modele,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Tu es un expert en cybersécurité chargé de résumer un flux réseau malicieux. "
-                        "Chaque flux est au format JSON et contient des caractéristiques techniques (paquets, octets, durée, ratio, etc.) "
-                        "et une prédiction ('Mal' ou 'Normal'). Ton objectif est de générer UNE SEULE formulation courte et claire, "
-                        "compréhensible par un analyste SOC. Mets en avant les anomalies importantes (asymétrie, volume, durée, ratio). "
-                        "Ta réponse ne doit PAS dépasser 3 phrases courtes."
+        # Code OpenAI commenté pour améliorer les performances
+        # response = openai_client.chat.completions.create(
+        #     model=modele,
+        #     messages=[
+        #         {
+        #             "role": "system",
+        #             "content": (
+        #                 "Tu es un expert en cybersécurité chargé de résumer un flux réseau malicieux. "
+        #                 "Chaque flux est au format JSON et contient des caractéristiques techniques (paquets, octets, durée, ratio, etc.) "
+        #                 "et une prédiction ('Mal' ou 'Normal'). Ton objectif est de générer UNE SEULE formulation courte et claire, "
+        #                 "compréhensible par un analyste SOC. Mets en avant les anomalies importantes (asymétrie, volume, durée, ratio). "
+        #                 "Ta réponse ne doit PAS dépasser 3 phrases courtes."
+        #             )
+        #         },
+        #         {
+        #             "role": "user",
+        #             "content": f"Voici un flow à résumer : {texte}"
+        #         }
+        #     ],
+        #     temperature=0.5,
+        #     max_tokens=200  # Ajuste selon ton usage
+        # )
+        # return response.choices[0].message.content.strip()
 
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": f"Voici un flow à résumer : {texte}"
-                }
-            ],
-            temperature=0.5,
-            max_tokens=200  # Ajuste selon ton usage
-        )
-        return response.choices[0].message.content.strip()
+        # Remplacement par une fonction simplifiée
+        import json
+        try:
+            data = json.loads(texte)
+            prediction = data.get("prediction", "inconnu")
+            src_ip = data.get("src_ip", "inconnu")
+            dst_ip = data.get("dst_ip", "inconnu")
+            return f"Flow {src_ip} → {dst_ip} classé comme {prediction}."
+        except:
+            return "Résumé simplifié du flow (OpenAI désactivé)"
     except Exception as e:
         return f"Erreur de résumé : {e}"
 
