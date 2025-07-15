@@ -98,7 +98,12 @@ def resumer_texte(texte, modele="gpt-3.5-turbo"):
             prediction = data.get("prediction", "inconnu")
             src_ip = data.get("src_ip", "inconnu")
             dst_ip = data.get("dst_ip", "inconnu")
-            return f"Flow {src_ip} → {dst_ip} classé comme {prediction}."
+
+            # Si les IPs sont inconnues, on affiche uniquement la prédiction
+            if src_ip == "inconnu" or dst_ip == "inconnu":
+                return f"Classé comme {prediction}"
+            else:
+                return f"Flow {src_ip} → {dst_ip} classé comme {prediction}"
         except:
             return "Résumé simplifié du flow (OpenAI désactivé)"
     except Exception as e:
