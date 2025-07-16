@@ -8,7 +8,7 @@ networks:
       com.docker.network.bridge.name: br-benign
     ipam:
       config:
-        - subnet: 172.30.0.0/16  # Trafic normal
+        - subnet: 172.30.0.0/16
   attack-net:
     driver: bridge
     name: attack-net
@@ -19,7 +19,6 @@ networks:
         - subnet: 172.31.0.0/16
 
 services:
-  # Serveur HTTP (victime)
   web:
     image: nginx:alpine
     networks:
@@ -28,7 +27,6 @@ services:
     ports:
       - "8081:80"
 
-  # Serveur SSH (victime)
   ssh:
     image: linuxserver/openssh-server
     networks:
@@ -42,7 +40,6 @@ services:
     ports:
       - "2222:2222"
 
-  # Générateur de trafic HTTP
   benign-http:
     image: curlimages/curl
     networks:
@@ -51,7 +48,6 @@ services:
       - web
     command: ["sh", "-c", "while true; do curl -s http://web > /dev/null; sleep 1; done"]
 
-  # Générateur de trafic SSH
   benign-ssh:
     image: alpine
     networks:
@@ -60,14 +56,12 @@ services:
       - ssh
     command: ["sh", "-c", "apk add --no-cache openssh-client sshpass && while true; do sshpass -p test ssh -o StrictHostKeyChecking=no test@ssh -p 2222 'echo hello' > /dev/null 2>&1 || true; sleep 3; done"]
 
-  # Générateur de requêtes DNS valides
   benign-dns:
     image: busybox
     networks:
       - benign-net
     command: ["sh", "-c", "while true; do nslookup google.com > /dev/null; sleep 4; done"]
 
-  # Attaque HTTP flood
   attacker-httpflood:
     image: williamyeh/wrk
     networks:
@@ -75,16 +69,15 @@ services:
     entrypoint: ["/bin/sh"]
     command: ["-c", "while true; do echo '[+] wrk burst…'; wrk -t2 -c200 -d60s http://web:80/; sleep 5; done"]
 
-  # Attaque DDoS
   attacker-ddos:
     image: ubuntu:22.04
     networks:
       - attack-net
     command: ["bash", "-c", "set -e && export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && apt-get install -yqq siege && echo '[+] siege loop…' && while true; do siege -q -b -c 200 -t 60S http://web:80/ || true; sleep 5; done"]
 
-  # Attaque port scan
+  # VERSION ULTRA SIMPLE SANS VARIABLES
   attacker-portscan:
     image: ubuntu:22.04
     networks:
       - attack-net
-    command: ["bash", "-c", "set -e && export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && apt-get install -yqq nmap && echo '[+] looped SYN scan every 30 s' && while true; do TS=$(date '+%F %T') && echo '--- $TS : scan start ---' && nmap -sS -T4 -p- web -oG - | grep -v '^#' && echo '--- $TS : scan end ---' && sleep 30; done"]
+    command: ["bash", "-c", "apt-get update -qq && apt-get install -yqq nmap && echo '[+] looped SYN scan every 30 s' && while true; do echo '--- scan start ---' && nmap -sS -T4 -p- web -oG - | grep -v '^#' && echo '--- scan end ---' && sleep 30; done"]
