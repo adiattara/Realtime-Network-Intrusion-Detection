@@ -1351,9 +1351,34 @@ class UltimateNetworkApp:
                 # Filtrer tout None éventuel (sécurité)
                 all_flow_cards = [card for card in all_flow_cards if card is not None]
 
+                # Trier les cartes: normal en premier, malicieux en dernier
+                # On doit d'abord associer chaque carte à sa prédiction
+                normal_cards = []
+                error_cards = []
+                malicious_cards = []
+
+                for card in all_flow_cards:
+                    # Vérifier si c'est une carte d'erreur (Alert)
+                    if isinstance(card, dbc.Alert):
+                        error_cards.append(card)
+                        continue
+
+                    # Pour les cartes normales, on regarde la classe du CardHeader
+                    header_class = card.children[0].className if card.children and hasattr(card.children[0], 'className') else ""
+
+                    if "bg-success" in header_class:
+                        normal_cards.append(card)
+                    elif "bg-danger" in header_class:
+                        malicious_cards.append(card)
+                    else:
+                        error_cards.append(card)
+
+                # Réorganiser les cartes: normal en premier, puis erreurs, puis malicieux
+                sorted_cards = normal_cards + error_cards + malicious_cards
+
                 # Toujours passer une liste de composants Dash, jamais de None ou d'objet natif
                 terminated_flows_content = html.Div(
-                    all_flow_cards,
+                    sorted_cards,
                     style={
                         'maxHeight': '550px',  # ajuste la hauteur à ton besoin
                         'overflowY': 'auto',
