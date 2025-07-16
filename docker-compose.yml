@@ -28,18 +28,18 @@ services:
     ports:
       - "8081:80"
 
-  # Serveur FTP (victime)
-  ftp:
-    image: fauria/vsftpd
-    networks:
-      - benign-net
-      - attack-net
-    environment:
-      - FTP_USER=user
-      - FTP_PASS=pass
-      - LOG_STDOUT=Yes
-    volumes:
-      - ./ftpdata:/home/vsftpd
+#  # Serveur FTP (victime)
+#  ftp:
+#    image: fauria/vsftpd
+#    networks:
+#      - benign-net
+#      - attack-net
+#    environment:
+#      - FTP_USER=user
+#      - FTP_PASS=pass
+#      - LOG_STDOUT=Yes
+#    volumes:
+#      - ./ftpdata:/home/vsftpd
 
   # Serveur SSH (victime)
   ssh:
@@ -65,15 +65,15 @@ services:
     command: >
       sh -c "while true; do curl -s http://web > /dev/null; sleep 1; done"
 
-  # Générateur de trafic FTP
-  benign-ftp:
-    image: curlimages/curl
-    networks:
-      - benign-net
-    depends_on:
-      - ftp
-    command: >
-      sh -c "while true; do curl -s ftp://user:pass@ftp/ > /dev/null; sleep 2; done"
+#  # Générateur de trafic FTP
+#  benign-ftp:
+#    image: curlimages/curl
+#    networks:
+#      - benign-net
+#    depends_on:
+#      - ftp
+#    command: >
+#      sh -c "while true; do curl -s ftp://user:pass@ftp/ > /dev/null; sleep 2; done"
 
   # Générateur de trafic SSH
   benign-ssh:
@@ -99,54 +99,54 @@ services:
 
 
   # ─── Attaques ────────────────────────────────
-#  attacker-httpflood:
-#    image: williamyeh/wrk
-#    networks:
-#      - attack-net
-#    entrypoint: /bin/sh
-#    command:
-#      - -c
-#      - |
-#        while true; do
-#          echo "[+] wrk burst…"
-#          wrk -t2 -c200 -d60s http://web:80/
-#          sleep 5
-#        done
-#
-#  attacker-ddos:
-#    image: ubuntu:22.04
-#    networks:
-#      - attack-net
-#    command:
-#      - bash
-#      - -c
-#      - |
-#        set -e &&
-#        export DEBIAN_FRONTEND=noninteractive &&
-#        apt-get update -qq &&
-#        apt-get install -yqq siege &&
-#        echo '[+] siege loop…' &&
-#        while true; do
-#          siege -q -b -c 200 -t 60S http://web:80/ || true
-#          sleep 5
-#        done
-#  attacker-portscan:
-#    image: ubuntu:22.04
-#    networks:
-#      - attack-net
-#    command:
-#      - bash
-#      - -c
-#      - |
-#        set -e &&
-#        export DEBIAN_FRONTEND=noninteractive &&
-#        apt-get update -qq &&
-#        apt-get install -yqq nmap &&
-#        echo '[+] looped SYN scan every 30 s' &&
-#        while true; do
-#          TS=$(date '+%F %T')
-#          echo "--- $TS : scan start ---"
-#          nmap -sS -T4 -p- web -oG - | grep -v '^#'
-#          echo "--- $TS : scan end ---"
-#          sleep 30
-#        done
+  attacker-httpflood:
+    image: williamyeh/wrk
+    networks:
+      - attack-net
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        while true; do
+          echo "[+] wrk burst…"
+          wrk -t2 -c200 -d60s http://web:80/
+          sleep 5
+        done
+
+  attacker-ddos:
+    image: ubuntu:22.04
+    networks:
+      - attack-net
+    command:
+      - bash
+      - -c
+      - |
+        set -e &&
+        export DEBIAN_FRONTEND=noninteractive &&
+        apt-get update -qq &&
+        apt-get install -yqq siege &&
+        echo '[+] siege loop…' &&
+        while true; do
+          siege -q -b -c 200 -t 60S http://web:80/ || true
+          sleep 5
+        done
+  attacker-portscan:
+    image: ubuntu:22.04
+    networks:
+      - attack-net
+    command:
+      - bash
+      - -c
+      - |
+        set -e &&
+        export DEBIAN_FRONTEND=noninteractive &&
+        apt-get update -qq &&
+        apt-get install -yqq nmap &&
+        echo '[+] looped SYN scan every 30 s' &&
+        while true; do
+          TS=$(date '+%F %T')
+          echo "--- $TS : scan start ---"
+          nmap -sS -T4 -p- web -oG - | grep -v '^#'
+          echo "--- $TS : scan end ---"
+          sleep 30
+        done
