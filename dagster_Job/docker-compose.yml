@@ -1,5 +1,20 @@
 version: "3.7"
 services:
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: mlflow_server
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+    volumes:
+      - mlflow_data:/mlflow
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow.db --default-artifact-root /mlflow/artifacts
+    networks:
+      - dags_network
+      - network_db_network
+
   dagster_postgresql:
     image: postgres:14
     container_name: dagster_postgresql
@@ -72,3 +87,6 @@ networks:
 
   network_db_network:
       external: true
+
+volumes:
+  mlflow_data:

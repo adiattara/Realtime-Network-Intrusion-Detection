@@ -7,9 +7,17 @@ import pandas as pd
 from tensorflow.keras.models import load_model
 from sklearn.metrics import classification_report, accuracy_score
 from model import construire_ann  # ta fonction pour créer le modèle
+import mlflow
+import mlflow.keras
+import mlflow.sklearn
+from datetime import datetime
 
 # === CONFIGURATION ===
 import os
+
+# Configuration MLflow
+os.environ["MLFLOW_TRACKING_URI"] = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
+EXPERIMENT_NAME = "network_anomaly_detection"
 
 DB_CONFIG = {
     "host": os.environ.get("DB_HOST", "network_db"),
@@ -57,11 +65,28 @@ def load_feedback_flows():
 def evaluate_model(model, X, y, label=""):
     y_pred = (model.predict(X) > 0.5).astype(int)
     print(f"\n📊 Rapport de classification : {label}")
+    report = classification_report(y, y_pred, output_dict=True)
     print(classification_report(y, y_pred))
-    return accuracy_score(y, y_pred)
+    accuracy = accuracy_score(y, y_pred)
+
+    # Retourner les métriques pour MLflow
+    metrics = {
+        "accuracy": accuracy,
+        "precision_0": report["0"]["precision"],
+        "recall_0": report["0"]["recall"],
+        "f1_score_0": report["0"]["f1-score"],
+        "precision_1": report["1"]["precision"],
+        "recall_1": report["1"]["recall"],
+        "f1_score_1": report["1"]["f1-score"],
+    }
+
+    return accuracy, metrics
 
 # === PIPELINE PRINCIPAL ===
 def main():
+    # Configurer MLflow
+    mlflow.set_experiment(EXPERIMENT_NAME)
+
     print("📥 Chargement des données signalées...")
     df = load_feedback_flows()
 
@@ -79,39 +104,90 @@ def main():
     current_model = load_model(MODEL_PATH)
 
     # Appliquer le scaler
-    # Vérifier si scaler est un objet StandardScaler ou un numpy array
     if hasattr(scaler, 'transform'):
         X_scaled = scaler.transform(X_new)
     else:
-        # Si c'est un numpy array, on suppose que c'est déjà les données transformées
-        # ou qu'il contient les paramètres de scaling (mean, std)
         from sklearn.preprocessing import StandardScaler
         temp_scaler = StandardScaler()
-        # On fait un fit sur les données actuelles pour initialiser le scaler
         temp_scaler.fit(X_new)
-        # On remplace les attributs mean_ et scale_ par ceux du scaler chargé
         if isinstance(scaler, tuple) and len(scaler) == 2:
-            # Si c'est un tuple (mean, std)
             temp_scaler.mean_ = scaler[0]
             temp_scaler.scale_ = scaler[1]
         X_scaled = temp_scaler.transform(X_new)
 
-    # Créer nouveau modèle avec mêmes poids
-    print("🔁 Réentraînement du modèle avec feedback...")
-    new_model = construire_ann(X_scaled.shape[1])
-    new_model.set_weights(current_model.get_weights())
-    new_model.fit(X_scaled, y_new, epochs=5, batch_size=32, validation_split=0.2)
+    # Démarrer un run MLflow
+    with mlflow.start_run(run_name=f"fine_tune_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
+        # Loguer les paramètres
+        mlflow.log_params({
+            "epochs": 5,
+            "batch_size": 32,
+            "validation_split": 0.2,
+            "input_features": len(FEATURES),
+            "training_samples": len(X_new)
+        })
 
-    # Évaluer l'ancien et le nouveau
-    acc_old = evaluate_model(current_model, X_blind, y_blind, label="Ancien modèle")
-    acc_new = evaluate_model(new_model, X_blind, y_blind, label="Nouveau modèle")
+        # Loguer le scaler
+        mlflow.sklearn.log_model(scaler, "scaler")
 
-    # Comparaison
-    if acc_new >= acc_old:
-        print("✅ Nouveau modèle adopté, sauvegarde en cours...")
-        new_model.save(MODEL_PATH)
-    else:
-        print("❌ Nouveau modèle moins bon, conservation de l'ancien.")
+        # Évaluer l'ancien modèle
+        print("📊 Évaluation du modèle actuel...")
+        acc_old, metrics_old = evaluate_model(current_model, X_blind, y_blind, label="Ancien modèle")
+
+        # Loguer les métriques de l'ancien modèle
+        for key, value in metrics_old.items():
+            mlflow.log_metric(f"old_{key}", value)
+
+        # Créer nouveau modèle avec mêmes poids
+        print("🔁 Réentraînement du modèle avec feedback...")
+        new_model = construire_ann(X_scaled.shape[1])
+        new_model.set_weights(current_model.get_weights())
+
+        # Entraîner le modèle et capturer l'historique
+        history = new_model.fit(
+            X_scaled, y_new, 
+            epochs=5, 
+            batch_size=32, 
+            validation_split=0.2,
+            verbose=1
+        )
+
+        # Loguer les métriques d'entraînement
+        for epoch, (loss, acc, val_loss, val_acc) in enumerate(zip(
+            history.history['loss'],
+            history.history['accuracy'],
+            history.history['val_loss'],
+            history.history['val_accuracy']
+        )):
+            mlflow.log_metrics({
+                "train_loss": loss,
+                "train_accuracy": acc,
+                "val_loss": val_loss,
+                "val_accuracy": val_acc
+            }, step=epoch)
+
+        # Évaluer le nouveau modèle
+        acc_new, metrics_new = evaluate_model(new_model, X_blind, y_blind, label="Nouveau modèle")
+
+        # Loguer les métriques du nouveau modèle
+        for key, value in metrics_new.items():
+            mlflow.log_metric(f"new_{key}", value)
+
+        # Loguer l'amélioration
+        improvement = acc_new - acc_old
+        mlflow.log_metric("accuracy_improvement", improvement)
+
+        # Comparaison et sauvegarde
+        if acc_new >= acc_old:
+            print("✅ Nouveau modèle adopté, sauvegarde en cours...")
+            new_model.save(MODEL_PATH)
+            # Loguer le modèle dans MLflow
+            mlflow.keras.log_model(new_model, "model")
+            mlflow.log_artifact(MODEL_PATH, "saved_model")
+            mlflow.set_tag("model_status", "adopted")
+        else:
+            print("❌ Nouveau modèle moins bon, conservation de l'ancien.")
+            mlflow.keras.log_model(current_model, "model")
+            mlflow.set_tag("model_status", "rejected")
 
 if __name__ == "__main__":
     main()

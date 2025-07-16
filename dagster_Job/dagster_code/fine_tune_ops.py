@@ -15,7 +15,8 @@ def fine_tune_model_op(context):
             "DB_PORT": "5432",
             "DB_NAME": "networkdb",
             "DB_USER": "user",
-            "DB_PASSWORD": "password"
+            "DB_PASSWORD": "password",
+            "MLFLOW_TRACKING_URI": "http://mlflow:5000"
         })
 
         # Change to the fine_tune directory to ensure the script can find all required files
