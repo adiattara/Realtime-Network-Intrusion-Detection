@@ -8,7 +8,7 @@ networks:
       com.docker.network.bridge.name: br-benign
     ipam:
       config:
-        - subnet: 172.30.0.0/16    # Trafic normal
+        - subnet: 172.30.0.0/16  # Trafic normal
   attack-net:
     driver: bridge
     name: attack-net
@@ -28,18 +28,18 @@ services:
     ports:
       - "8081:80"
 
-#  # Serveur FTP (victime)
-#  ftp:
-#    image: fauria/vsftpd
-#    networks:
-#      - benign-net
-#      - attack-net
-#    environment:
-#      - FTP_USER=user
-#      - FTP_PASS=pass
-#      - LOG_STDOUT=Yes
-#    volumes:
-#      - ./ftpdata:/home/vsftpd
+  # Serveur FTP (victime)
+  # ftp:
+  #   image: fauria/vsftpd
+  #   networks:
+  #     - benign-net
+  #     - attack-net
+  #   environment:
+  #     - FTP_USER=user
+  #     - FTP_PASS=pass
+  #     - LOG_STDOUT=Yes
+  #   volumes:
+  #     - ./ftpdata:/home/vsftpd
 
   # Serveur SSH (victime)
   ssh:
@@ -55,7 +55,7 @@ services:
     ports:
       - "2222:2222"
 
-  ## Générateur de trafic HTTP
+  # Générateur de trafic HTTP
   benign-http:
     image: curlimages/curl
     networks:
@@ -65,15 +65,15 @@ services:
     command: >
       sh -c "while true; do curl -s http://web > /dev/null; sleep 1; done"
 
-#  # Générateur de trafic FTP
-#  benign-ftp:
-#    image: curlimages/curl
-#    networks:
-#      - benign-net
-#    depends_on:
-#      - ftp
-#    command: >
-#      sh -c "while true; do curl -s ftp://user:pass@ftp/ > /dev/null; sleep 2; done"
+  # Générateur de trafic FTP
+  # benign-ftp:
+  #   image: curlimages/curl
+  #   networks:
+  #     - benign-net
+  #   depends_on:
+  #     - ftp
+  #   command: >
+  #     sh -c "while true; do curl -s ftp://user:pass@ftp/ > /dev/null; sleep 2; done"
 
   # Générateur de trafic SSH
   benign-ssh:
@@ -96,7 +96,6 @@ services:
       - benign-net
     command: >
       sh -c "while true; do nslookup google.com > /dev/null; sleep 4; done"
-
 
   # ─── Attaques ────────────────────────────────
   attacker-httpflood:
@@ -130,6 +129,7 @@ services:
           siege -q -b -c 200 -t 60S http://web:80/ || true
           sleep 5
         done
+
   attacker-portscan:
     image: ubuntu:22.04
     networks:
