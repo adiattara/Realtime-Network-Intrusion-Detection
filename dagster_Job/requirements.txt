@@ -1,0 +1,11 @@
+dagster
+dagit
+boto3
+requests
+dagster-postgres
+tensorflow
+pydantic
+keras
+pandas
+numpy
+scikit-learn
