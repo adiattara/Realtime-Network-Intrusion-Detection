@@ -16,10 +16,13 @@ def fine_tune_model_op(context):
             "DB_NAME": "networkdb",
             "DB_USER": "user",
             "DB_PASSWORD": "password",
-            "WANDB_API_KEY": os.environ.get("WANDB_API_KEY", ""),  # Get from environment or set in .env file
-            "WANDB_ENTITY": os.environ.get("WANDB_ENTITY", ""),    # Your wandb username or team name
-            "WANDB_MODE": os.environ.get("WANDB_MODE", "online")   # Set to "offline" for testing without internet
+            "MLFLOW_TRACKING_URI": "http://mlflow:5000",
+            "S3_BUCKET_NAME": os.environ.get("S3_BUCKET_NAME", "rnid-retrained-models-pa"),
+            "S3_ENDPOINT_URL": os.environ.get("S3_ENDPOINT_URL", "https://s3.eu-west-3.amazonaws.com"),
+            "AWS_ACCESS_KEY_ID": os.environ.get("AWS_ACCESS_KEY_ID", "AKIA3DZD3S725PDEIAUT"),
+            "AWS_SECRET_ACCESS_KEY": os.environ.get("AWS_SECRET_ACCESS_KEY", "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")
         })
+        context.log.info(f"Bucket: {env['S3_BUCKET_NAME']} Endpoint: {env['S3_ENDPOINT_URL']}")
 
         # Change to the fine_tune directory to ensure the script can find all required files
         result = subprocess.run(
@@ -30,7 +33,7 @@ def fine_tune_model_op(context):
             env=env,
             cwd="/opt/dagster/dagster_home/fine_tune"
         )
-        context.log.info("✅ Réentraînement terminé avec succès.")
+        context.log.info("✅ Réentraînement terminé avec succès..")
         context.log.debug(f"Sortie du script :\n{result.stdout}")
     except subprocess.CalledProcessError as e:
         context.log.error("❌ Échec du réentraînement.")
