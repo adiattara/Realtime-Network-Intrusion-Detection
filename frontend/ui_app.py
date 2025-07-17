@@ -45,7 +45,7 @@ HAS_POSTGRES_USER_MANAGER = True
 load_dotenv()
 
 
-API_URL = os.environ.get('API_URL', "http://localhost:8005/predict")
+API_URL = os.environ.get('API_URL', "http://model-server:8000/predict")
 # Create a custom httpx client without proxy settings
 http_client = httpx.Client()
 # openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'), http_client=http_client)  # Commented out to improve performance

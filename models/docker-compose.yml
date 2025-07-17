@@ -6,6 +6,8 @@ services:
     container_name: model-server
     ports:
       - "8004:8000"    # expose 8000 du container en 8004 sur l'hôte
+    networks:
+      - network_db_network
 
 networks:
   network_db_network:

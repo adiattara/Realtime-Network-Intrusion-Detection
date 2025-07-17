@@ -40,7 +40,7 @@ class PostgreSQLUserManager:
         self.sessions: Dict[str, UserSession] = {}
 
         # PostgreSQL connection parameters
-        self.database_url = os.environ.get('DATABASE_URL', "postgresql://user:password@network_db:5432/networkdb")
+        self.database_url = os.environ.get('DATABASE_URL', "postgresql://user:password@localhost:5432/networkdb")
 
         # Initialize the database and create default admin if needed
         try:
