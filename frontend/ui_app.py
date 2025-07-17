@@ -517,6 +517,9 @@ class UltimateNetworkApp:
         self.displayed_flows = {}  # user_id -> {flow_key: timestamp_affichage}
         self.accumulated_flow_cards = {}  # user_id -> {flow_key: flow_card}
 
+        # Store throughput history for each user
+        self.throughput_history = {}  # user_id -> [(timestamp, throughput_value), ...]
+
         self.init_database()
         self.setup_layout()
         self.setup_callbacks()
@@ -1376,8 +1379,9 @@ class UltimateNetworkApp:
             [Output('user-stats-cards', 'children'),
              Output('flows-live-table', 'children'),
              Output('traffic-chart', 'figure'),
+             Output('throughput-time-chart', 'figure'),  # New output for throughput time chart
              Output('debit-actuel-value', 'children'),
-             Output('sessions-actives-value', 'children'),
+             #Output('sessions-actives-value', 'children'),
              #Output('connexions-anormales-value', 'children'),
              Output('top-ips-chart', 'figure'),
              Output('capture-status-dashboard', 'children', allow_duplicate=True),
@@ -1390,11 +1394,11 @@ class UltimateNetworkApp:
         )
         def update_dashboard_live(n_intervals, session_data, pathname):
             if not session_data:
-                return [], html.P("Session expirée"), go.Figure(), no_update, no_update, no_update
+                return [], html.P("Session expirée"), go.Figure(), go.Figure(), no_update, no_update, no_update, no_update, no_update
 
             capture_manager = self.get_user_capture_manager(session_data['session_id'])
             if not capture_manager:
-                return [], html.P("Erreur utilisateur"), go.Figure(), no_update, no_update, no_update
+                return [], html.P("Erreur utilisateur"), go.Figure(), go.Figure(), no_update, no_update, no_update, no_update, no_update
 
             # Traitement des nouveaux flows - toujours exécuté même si l'utilisateur n'est pas sur le dashboard
             # pour continuer à collecter les données
@@ -1414,11 +1418,12 @@ class UltimateNetworkApp:
             if pathname != '/dashboard':
                 # Continuer à traiter les données mais ne pas mettre à jour l'interface
                 # Cela permet de maintenir l'état interne à jour
-                return no_update, no_update, no_update, no_update, no_update, no_update
+                return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
             # Statistiques utilisateur
             stats = capture_manager.flow_aggregator.get_statistics()
             user = self.user_manager.get_user_by_session(session_data['session_id'])
+            user_id = session_data['session_id']
 
             stats_cards = [
                 self.create_stat_card("📊 Paquets", stats['total_packets_processed'], 'primary'),
@@ -1440,8 +1445,23 @@ class UltimateNetworkApp:
             interval_s = 1  # Ajuste selon ton intervalle réel de rafraîchissement
             debit_mbps = (debit_bytes * 8) / 1_000_000 / interval_s  # en Mbps
 
-            # Calcul du nombre de sessions actives
-            nb_sessions = sum(1 for flow in active_flows if flow.get('status') == 'active')
+            # Store throughput data in history
+            if user_id not in self.throughput_history:
+                self.throughput_history[user_id] = []
+
+            # Add current timestamp and throughput value to history
+            current_time = datetime.now()
+            self.throughput_history[user_id].append((current_time, debit_mbps))
+
+            # Limit history to last 100 points to prevent memory issues
+            if len(self.throughput_history[user_id]) > 100:
+                self.throughput_history[user_id] = self.throughput_history[user_id][-100:]
+
+            # Create throughput time chart
+            throughput_fig = self.create_throughput_time_chart(user_id)
+
+            # Calcul du nombre de sessions actives (commenté car non utilisé)
+            # nb_sessions = sum(1 for flow in active_flows if flow.get('status') == 'active')
 
             nb_connexions_anormales = sum(1 for flow in active_flows if flow.get('status') == 'anomalous')
 
@@ -1479,7 +1499,7 @@ class UltimateNetworkApp:
                 stop_btn_disabled = True
                 stop_btn_style = {'display': 'none'}
 
-            return stats_cards, flows_table, traffic_fig, f"{debit_mbps:.2f} Mbps", nb_sessions, fig_top_ips, capture_status, stop_btn_disabled, stop_btn_style
+            return stats_cards, flows_table, traffic_fig, throughput_fig, f"{debit_mbps:.2f} Mbps", fig_top_ips, capture_status, stop_btn_disabled, stop_btn_style
 
         # Update Capture Page Controls
         @callback(
@@ -2041,6 +2061,50 @@ class UltimateNetworkApp:
 
         return fig
 
+    def create_throughput_time_chart(self, user_id):
+        """
+        Create a time-series chart showing the average network throughput over time.
+
+        Args:
+            user_id: The ID of the user to get throughput history for
+
+        Returns:
+            A Plotly figure object
+        """
+        # Get the throughput history for this user
+        history = self.throughput_history.get(user_id, [])
+
+        if not history:
+            fig = go.Figure()
+            fig.add_annotation(
+                text="Aucune donnée de débit disponible",
+                xref="paper", yref="paper", x=0.5, y=0.5,
+                showarrow=False, font=dict(size=16, color="gray")
+            )
+            fig.update_layout(title="📊 Débit Moyen du Réseau au Cours du Temps")
+            return fig
+
+        # Convert history to dataframe for plotting
+        df = pd.DataFrame(history, columns=['timestamp', 'throughput'])
+
+        # Create the time-series chart
+        fig = px.line(
+            df, x='timestamp', y='throughput',
+            title="📊 Débit Moyen du Réseau au Cours du Temps",
+            labels={'timestamp': 'Temps', 'throughput': 'Débit (Mbps)'},
+            line_shape='linear'
+        )
+
+        # Customize the layout
+        fig.update_layout(
+            xaxis_title="Temps",
+            yaxis_title="Débit (Mbps)",
+            height=400,
+            margin=dict(l=40, r=40, t=40, b=40)
+        )
+
+        return fig
+
     def create_flow_details(self, flow):
         features = extract_cic_features(flow)
 
@@ -2261,6 +2325,18 @@ class UltimateNetworkApp:
                 ], width=12)
             ], className="mb-4"),
 
+            # Graphique de débit moyen au cours du temps
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("📈 Débit Moyen du Réseau au Cours du Temps"),
+                        dbc.CardBody([
+                            dcc.Graph(id='throughput-time-chart', style={'height': '400px'})
+                        ])
+                    ])
+                ], width=12)
+            ], className="mb-4"),
+
             dbc.Row([
                             dbc.Col([
                                 dbc.Card([
@@ -2271,15 +2347,6 @@ class UltimateNetworkApp:
                                     ])
                                 ], color="light")
                             ], width=3),
-                            dbc.Col([
-                                dbc.Card([
-                                    dbc.CardBody([
-                                        html.H4("Sessions Actives", className="card-title"),
-                                        html.H2(id="sessions-actives-value", className="card-text", style={"color": "#6366F1"}),
-                                        html.Div("👥", style={"fontSize": "2rem"})
-                                    ])
-                                ], color="light")
-                            ], width=3)
                             #dbc.Col([
                             #    dbc.Card([
                             #        dbc.CardBody([
