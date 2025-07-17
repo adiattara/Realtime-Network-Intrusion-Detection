@@ -158,7 +158,27 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         tmp_model_path = f"retrained_model_{timestamp}.h5"
         new_model.save(tmp_model_path)
-        upload_to_s3(tmp_model_path, os.path.basename(tmp_model_path))
+
+        # Upload to S3 and log the path
+        s3_object_name = os.path.basename(tmp_model_path)
+        upload_to_s3(tmp_model_path, s3_object_name)
+
+        # Construct S3 URL for direct access and log it to MLflow
+        if S3_ENDPOINT:
+            # For AWS S3, the URL format is https://s3.<region>.amazonaws.com/<bucket>/<object>
+            if "amazonaws.com" in S3_ENDPOINT:
+                s3_url = f"{S3_ENDPOINT}/{S3_BUCKET}/{s3_object_name}"
+            else:
+                # For other S3-compatible storage
+                clean_endpoint = S3_ENDPOINT.replace("https://", "").replace("http://", "")
+                s3_url = f"https://{clean_endpoint}/{S3_BUCKET}/{s3_object_name}"
+        else:
+            # Default AWS S3 URL format
+            s3_url = f"https://s3.amazonaws.com/{S3_BUCKET}/{s3_object_name}"
+
+        # Log the S3 URL to MLflow
+        mlflow.log_param("model_s3_path", s3_url)
+        print(f"✅ S3 path logged to MLflow: {s3_url}")
 
         if acc_new >= acc_old:
             print("✅ Nouveau modèle adopté, mise à jour...")
