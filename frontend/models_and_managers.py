@@ -395,9 +395,9 @@ class UserCaptureManager:
     def __init__(self, user_id, user_email):
         self.user_id = user_id
         self.user_email = user_email
-        self.flow_aggregator = FlowAggregator(flow_timeout=30, cleanup_interval=10)
+        self.flow_aggregator = FlowAggregator(flow_timeout=5, cleanup_interval=10)
         self.flow_aggregator = FlowAggregator(
-            flow_timeout=30,
+            flow_timeout=5,
             cleanup_interval=10,
             alert_callback=self._alert_user
         )

@@ -375,9 +375,9 @@ class UserCaptureManager:
     def __init__(self, user_id, user_email):
         self.user_id = user_id
         self.user_email = user_email
-        self.flow_aggregator = FlowAggregator(flow_timeout=30, cleanup_interval=10)
+        self.flow_aggregator = FlowAggregator(flow_timeout=5, cleanup_interval=10)
         self.flow_aggregator = FlowAggregator(
-            flow_timeout=30,
+            flow_timeout=5,
             cleanup_interval=10,
             alert_callback=self._alert_user
         )
@@ -519,6 +519,7 @@ class UltimateNetworkApp:
 
         # Store throughput history for each user
         self.throughput_history = {}  # user_id -> [(timestamp, throughput_value), ...]
+
 
         self.init_database()
         self.setup_layout()
@@ -1354,6 +1355,24 @@ class UltimateNetworkApp:
                 # Filtrer tout None éventuel (sécurité)
                 all_flow_cards = [card for card in all_flow_cards if card is not None]
 
+                # Trier les cartes pour afficher les flows malveillants avant les normaux
+                # On extrait la classe du CardHeader pour déterminer si c'est normal ou malveillant
+                def get_card_type(card):
+                    try:
+                        # Les cartes malveillantes ont bg-danger, les normales ont bg-success
+                        if hasattr(card, 'children') and card.children and len(card.children) > 0:
+                            header = card.children[0]
+                            if hasattr(header, 'className') and 'bg-danger' in header.className:
+                                return 0  # Malicious flows first
+                            elif hasattr(header, 'className') and 'bg-success' in header.className:
+                                return 1  # Normal flows second
+                    except:
+                        pass
+                    return 2  # Other cards last
+
+                # Trier les cartes
+                all_flow_cards.sort(key=get_card_type)
+
                 # Toujours passer une liste de composants Dash, jamais de None ou d'objet natif
                 terminated_flows_content = html.Div(
                     all_flow_cards,
@@ -1380,7 +1399,6 @@ class UltimateNetworkApp:
              Output('flows-live-table', 'children'),
              Output('traffic-chart', 'figure'),
              Output('throughput-time-chart', 'figure'),  # New output for throughput time chart
-             Output('debit-actuel-value', 'children'),
              #Output('sessions-actives-value', 'children'),
              #Output('connexions-anormales-value', 'children'),
              Output('top-ips-chart', 'figure'),
@@ -1394,11 +1412,11 @@ class UltimateNetworkApp:
         )
         def update_dashboard_live(n_intervals, session_data, pathname):
             if not session_data:
-                return [], html.P("Session expirée"), go.Figure(), go.Figure(), no_update, no_update, no_update, no_update, no_update
+                return [], html.P("Session expirée"), go.Figure(), go.Figure(), no_update, no_update, no_update, no_update
 
             capture_manager = self.get_user_capture_manager(session_data['session_id'])
             if not capture_manager:
-                return [], html.P("Erreur utilisateur"), go.Figure(), go.Figure(), no_update, no_update, no_update, no_update, no_update
+                return [], html.P("Erreur utilisateur"), go.Figure(), go.Figure(), no_update, no_update, no_update, no_update
 
             # Traitement des nouveaux flows - toujours exécuté même si l'utilisateur n'est pas sur le dashboard
             # pour continuer à collecter les données
@@ -1418,20 +1436,12 @@ class UltimateNetworkApp:
             if pathname != '/dashboard':
                 # Continuer à traiter les données mais ne pas mettre à jour l'interface
                 # Cela permet de maintenir l'état interne à jour
-                return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
+                return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
             # Statistiques utilisateur
             stats = capture_manager.flow_aggregator.get_statistics()
             user = self.user_manager.get_user_by_session(session_data['session_id'])
             user_id = session_data['session_id']
-
-            stats_cards = [
-                self.create_stat_card("📊 Paquets", stats['total_packets_processed'], 'primary'),
-                self.create_stat_card("🔄 Flows Actifs", stats['active_flows'], 'success'),
-                self.create_stat_card("✅ Terminés", stats['completed_flows'], 'info'),
-                self.create_stat_card("👤 " + (user.username if user else "Unknown"),
-                                      user.role if user else "unknown", 'secondary')
-            ]
 
             # Table des flows en temps réel
             active_flows = capture_manager.flow_aggregator.get_active_flows(limit=30)
@@ -1445,20 +1455,31 @@ class UltimateNetworkApp:
             interval_s = 1  # Ajuste selon ton intervalle réel de rafraîchissement
             debit_mbps = (debit_bytes * 8) / 1_000_000 / interval_s  # en Mbps
 
-            # Store throughput data in history
-            if user_id not in self.throughput_history:
-                self.throughput_history[user_id] = []
+            stats_cards = [
+                self.create_stat_card("📊 Paquets", stats['total_packets_processed'], 'primary'),
+                self.create_stat_card("📡 Débit Actuel", f"{debit_mbps:.2f} Mbps", 'success'),
+                self.create_stat_card("👤 " + (user.username if user else "Unknown"),
+                                      user.role if user else "unknown", 'secondary')
+            ]
 
-            # Add current timestamp and throughput value to history
-            current_time = datetime.now()
-            self.throughput_history[user_id].append((current_time, debit_mbps))
+            # Store throughput data in history only if capture is active
+            capture_active = capture_manager.connection_active
 
-            # Limit history to last 100 points to prevent memory issues
-            if len(self.throughput_history[user_id]) > 100:
-                self.throughput_history[user_id] = self.throughput_history[user_id][-100:]
+            if capture_active:
+                if user_id not in self.throughput_history:
+                    self.throughput_history[user_id] = []
+
+                # Add current timestamp and throughput value to history
+                current_time = datetime.now()
+                self.throughput_history[user_id].append((current_time, debit_mbps))
+
+                # Limit history to last 100 points to prevent memory issues
+                if len(self.throughput_history[user_id]) > 100:
+                    self.throughput_history[user_id] = self.throughput_history[user_id][-100:]
 
             # Create throughput time chart
             throughput_fig = self.create_throughput_time_chart(user_id)
+
 
             # Calcul du nombre de sessions actives (commenté car non utilisé)
             # nb_sessions = sum(1 for flow in active_flows if flow.get('status') == 'active')
@@ -1488,8 +1509,6 @@ class UltimateNetworkApp:
 
 
             # Mise à jour du statut de capture dans le dashboard
-            capture_active = capture_manager.connection_active
-
             if capture_active:
                 capture_status = dbc.Alert("🟢 Capture en cours - Données en temps réel", color="success")
                 stop_btn_disabled = False
@@ -1499,7 +1518,7 @@ class UltimateNetworkApp:
                 stop_btn_disabled = True
                 stop_btn_style = {'display': 'none'}
 
-            return stats_cards, flows_table, traffic_fig, throughput_fig, f"{debit_mbps:.2f} Mbps", fig_top_ips, capture_status, stop_btn_disabled, stop_btn_style
+            return stats_cards, flows_table, traffic_fig, throughput_fig, fig_top_ips, capture_status, stop_btn_disabled, stop_btn_style
 
         # Update Capture Page Controls
         @callback(
@@ -2105,6 +2124,7 @@ class UltimateNetworkApp:
 
         return fig
 
+
     def create_flow_details(self, flow):
         features = extract_cic_features(flow)
 
@@ -2313,18 +2333,6 @@ class UltimateNetworkApp:
                 ])
             ]),
 
-            # Graphique de trafic
-            dbc.Row([
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader("📊 Analyse du Trafic"),
-                        dbc.CardBody([
-                            dcc.Graph(id='traffic-chart', style={'height': '400px'})
-                        ])
-                    ])
-                ], width=12)
-            ], className="mb-4"),
-
             # Graphique de débit moyen au cours du temps
             dbc.Row([
                 dbc.Col([
@@ -2337,26 +2345,19 @@ class UltimateNetworkApp:
                 ], width=12)
             ], className="mb-4"),
 
+            # Graphique de trafic
             dbc.Row([
-                            dbc.Col([
-                                dbc.Card([
-                                    dbc.CardBody([
-                                        html.H4("Débit Actuel", className="card-title"),
-                                        html.H2(id="debit-actuel-value", className="card-text", style={"color": "#3B82F6"}),
-                                        html.Div("📡", style={"fontSize": "2rem"})
-                                    ])
-                                ], color="light")
-                            ], width=3),
-                            #dbc.Col([
-                            #    dbc.Card([
-                            #        dbc.CardBody([
-                            #            html.H4("Connexions Anormales", className="card-title"),
-                            #            html.H2(id="connexions-anormales-value", className="card-text", style={"color": "#DC2626"}),
-                            #            html.Div("🚨", style={"fontSize": "2rem"})
-                            #        ])
-                            #    ], color="light")
-                            #], width=3)
-                        ], className="mb-4"),
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("📊 Analyse du Trafic"),
+                        dbc.CardBody([
+                            dcc.Graph(id='traffic-chart', style={'height': '400px'})
+                        ])
+                    ])
+                ], width=12)
+            ], className="mb-4"),
+
+
 
                         dbc.Row([
                             dbc.Col([

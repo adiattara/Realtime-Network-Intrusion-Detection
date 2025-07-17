@@ -107,7 +107,7 @@ for message in consumer:
         }
 
         log(f"Requête envoyée à {MODEL_ENDPOINT} avec payload : {model_input}")
-        response = requests.post(MODEL_ENDPOINT, json=model_input, timeout=30)
+        response = requests.post(MODEL_ENDPOINT, json=model_input, timeout=5)
         response.raise_for_status()
         prediction = response.json()["label"]
         score = response.json().get("score", 0.0)
