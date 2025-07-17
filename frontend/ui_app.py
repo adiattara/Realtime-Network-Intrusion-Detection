@@ -45,7 +45,7 @@ HAS_POSTGRES_USER_MANAGER = True
 load_dotenv()
 
 
-API_URL = os.environ.get('API_URL', "https://realtime-network-intrusion-detection-8itu.onrender.com/predict")
+API_URL = os.environ.get('API_URL', "http://localhost:8005/predict")
 # Create a custom httpx client without proxy settings
 http_client = httpx.Client()
 # openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'), http_client=http_client)  # Commented out to improve performance
@@ -544,7 +544,7 @@ class UltimateNetworkApp:
 
     def get_db_connection(self):
         """Get a connection to the PostgreSQL database"""
-        database_url = os.environ.get('DATABASE_URL', 'postgresql://user:password@network_db:5432/networkdb')
+        database_url = os.environ.get('DATABASE_URL', 'postgresql://user:password@localhost:5432/networkdb')
         conn = psycopg2.connect(database_url)
         return conn
 
@@ -1929,6 +1929,7 @@ class UltimateNetworkApp:
         table_data = []
         for flow in self.last_terminated_flows[::-1]:  # Plus récent en haut
             pred = flow.get('prediction', '').strip().lower()
+            print("pred =", pred)
             if not pred:
                 pred_affiche = "Analyse en cours…"
             elif pred not in ['mal', 'normal']:

@@ -11,7 +11,7 @@ import httpx
 
 load_dotenv()
 
-API_URL = os.environ.get('API_URL', "https://realtime-network-intrusion-detection-8itu.onrender.com/predict")
+API_URL = os.environ.get('API_URL', "http://localhost:8005/predict")
 # Create a custom httpx client without proxy settings
 http_client = httpx.Client()
 # openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'), http_client=http_client)  # Commented out to improve performance
@@ -20,7 +20,9 @@ http_client = httpx.Client()
 def predict_flow(flow_features):
     try:
         response = requests.post(API_URL, json=flow_features, timeout=1)
+        print("response api : ", response.status_code)
         if response.status_code == 200:
+            print("response api : ",response.status_code)
             return response.json().get("label", "N/A")
         else:
             return "Erreur API"

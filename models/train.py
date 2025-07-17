@@ -1,65 +1,63 @@
-# train.py
+from fastapi import FastAPI
+from pydantic import BaseModel
 import pickle
+import numpy as np
+from tensorflow.keras.models import load_model
 
-import pandas as pd
-import seaborn as sns
-from matplotlib import pyplot as plt
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+feature_cols = [
+  "total_bytes",
+  "pkt_count",
+  "psh_count",
+  "fwd_bytes",
+  "bwd_bytes",
+  "fwd_pkts",
+  "bwd_pkts",
+  "dport",
+  "duration_ms",
+  "flow_pkts_per_s",
+  "fwd_bwd_ratio"
+]
+# 1) Schéma de la requête HTTP
+class FlowFeatures(BaseModel):
+    total_bytes: int
+    pkt_count: int
+    psh_count: int
+    fwd_bytes: int
+    bwd_bytes: int
+    fwd_pkts: int
+    bwd_pkts: int
+    dport: int
+    duration_ms: float
+    flow_pkts_per_s: float
+    fwd_bwd_ratio: float
 
-from data_loader import charger_donnees_csv
-from feature_engineering import nettoyer
-from model import construire_ann
-from config import dossiers_donnees, colonnes_utiles, colonnes_numeriques
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix, accuracy_score
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report
 
+app = FastAPI(title="Network IDS Predictor", version="1.0")
 
+# 2) Charger le modèle globalement (startup)
+model = load_model("model.h5")
+with open("scaler.pkl", "rb") as f:
+    scaler = pickle.load(f)
 
-if __name__ == "__main__":
-    # 1. Charger les données
-    df = charger_donnees_csv(dossiers_donnees)
+@app.get("/")
+def root():
+    return {"message": "Network IDS FastAPI Model Server is up."}
 
-    minority = df[df['attack'] == False]
-    majority = df[df['attack'] == True].sample(n=len(minority), random_state=42)
+@app.post("/predict")
+def predict_flow(features: FlowFeatures):
+    # 1) Construire ton vecteur à partir du body JSON
+    X = np.array([[getattr(features, col) for col in feature_cols]], dtype=float)
 
-    df = pd.concat([minority, majority]).sample(frac=1, random_state=42)
+    # 2) Appliquer le scaler
+    X_scaled = scaler.transform(X)
 
-    df.head()
+    # 3) Prédire la probabilité
+    prob = float(model.predict(X_scaled)[0, 0])
+    print("Probabilité prédite :", prob)  # pour debug
 
-    print(df.head())
-    #print(df.dtypes)
-    # Nettoyer et normaliser
-    df = nettoyer(df)
-    #print(df.dtypes)
-    X = df.drop('attack', axis=1)
-    y = df['attack'].astype(int)
+    # 4) Choisir le label
+    label = "Malicious" if prob > 0.5 else "Normal"
 
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    # Split train/test
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_scaled, y, test_size=0.2, random_state=42,stratify=y
-    )
+    return {"label": label, "score": prob}
 
-    model = construire_ann(X_train.shape[1])
-
-    history = model.fit(X_train, y_train, validation_split=0.2, epochs=5, batch_size=32)
-
-    # Sauvegarde
-    with open("model.pkl", "wb") as f:
-        pickle.dump(model, f)
-
-    #
-    # Évaluer
-    y_pred = (model.predict(X_test) > 0.5).astype(int)
-
-    print("\n✅ Rapport de classification :")
-    print(classification_report(y_test, y_pred))
-
-    print(classification_report(y_test, y_pred))
 

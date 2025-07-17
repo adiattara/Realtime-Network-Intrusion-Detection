@@ -16,7 +16,9 @@ def fine_tune_model_op(context):
             "DB_NAME": "networkdb",
             "DB_USER": "user",
             "DB_PASSWORD": "password",
-            "MLFLOW_TRACKING_URI": "http://mlflow:5000"
+            "WANDB_API_KEY": os.environ.get("WANDB_API_KEY", ""),  # Get from environment or set in .env file
+            "WANDB_ENTITY": os.environ.get("WANDB_ENTITY", ""),    # Your wandb username or team name
+            "WANDB_MODE": os.environ.get("WANDB_MODE", "online")   # Set to "offline" for testing without internet
         })
 
         # Change to the fine_tune directory to ensure the script can find all required files

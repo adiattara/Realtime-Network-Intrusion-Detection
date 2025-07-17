@@ -5,7 +5,7 @@ LABEL authors="adiattara"
 WORKDIR /app
 
 # Copie du code + modèle + dépendances
-COPY serving.py model.pkl requirements.txt ./
+COPY serving.py model.pkl scaler.pkl model.h5 requirements.txt ./
 
 RUN pip install --no-cache-dir -r requirements.txt
 
