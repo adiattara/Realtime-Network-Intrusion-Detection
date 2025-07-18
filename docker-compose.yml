@@ -56,6 +56,7 @@ services:
   dash-ui:
     build: ./frontend
     container_name: dash_ui
+    user: root  # Utiliser root pour éviter les problèmes de permissions
     env_file:
       - ./frontend/.env
     environment:
@@ -70,7 +71,7 @@ services:
       - KAFKA_COMMANDS_TOPIC=${KAFKA_COMMANDS_TOPIC:-capture-commands}
       - KAFKA_PREDICTED_TOPIC=${KAFKA_PREDICTED_TOPIC:-predicted-flows}
     volumes:
-      - ./ssh_keys:/app/ssh_keys:rw
+      - ssh_keys_volume:/app/ssh_keys  # Utiliser un volume nommé
     ports:
       - "8050:8050"
     networks:
@@ -86,6 +87,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile.producer
     container_name: capture_service
+    user: root  # Utiliser root pour éviter les problèmes de permissions
     env_file:
       - ./frontend/.env
     environment:
@@ -93,7 +95,7 @@ services:
       - KAFKA_TOPIC=${KAFKA_TOPIC:-raw-packets}
       - KAFKA_COMMANDS_TOPIC=${KAFKA_COMMANDS_TOPIC:-capture-commands}
     volumes:
-      - ./ssh_keys:/app/ssh_keys:rw
+      - ssh_keys_volume:/app/ssh_keys  # Utiliser un volume nommé
     networks:
       - network_db_network
     depends_on:
@@ -134,8 +136,8 @@ services:
       - KAFKA_OUTPUT_TOPIC=${KAFKA_OUTPUT_TOPIC:-aggregated-flows}
       - DATABASE_URL=${DATABASE_URL:-postgresql://user:password@network_db:5432/networkdb}
     volumes:
-      - /tmp/checkpoint_networkflow_pg:/tmp/checkpoint_networkflow_pg
-      - ./chk_kafka:/app/chk_kafka
+      - spark_checkpoint_volume:/tmp/checkpoint_networkflow_pg  # Volume nommé
+      - kafka_checkpoint_volume:/app/chk_kafka  # Volume nommé
     networks:
       - network_db_network
     depends_on:
@@ -251,7 +253,6 @@ services:
     entrypoint:
       - dagster-daemon
       - run
-    restart: on-failure
     env_file:
       - ./dagster_Job/.env
     environment:
@@ -261,7 +262,7 @@ services:
       POSTGRES_HOST: ${DAGSTER_POSTGRES_HOST:-dagster_postgresql}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /tmp/io_manager_storage:/tmp/io_manager_storage
+      - dagster_storage_volume:/tmp/io_manager_storage  # Volume nommé
     networks:
       - dags_network
       - network_db_network
@@ -278,3 +279,7 @@ networks:
 
 volumes:
   postgres_data:
+  ssh_keys_volume:  # Volume pour les clés SSH
+  spark_checkpoint_volume:  # Volume pour les checkpoints Spark
+  kafka_checkpoint_volume:  # Volume pour les checkpoints Kafka
+  dagster_storage_volume:  # Volume pour le stockage Dagster
